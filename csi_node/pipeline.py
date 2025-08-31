@@ -48,8 +48,8 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
         r0_vals = [r[0] for r in rssis if len(r) >= 1]
         if r0_vals:
             rssi0 = float(np.mean(r0_vals))
-        r1_vals = [r[1] for r in rssis if len(r) >= 2]
-        if r1_vals:
+        if all(len(r) >= 2 for r in rssis):
+            r1_vals = [r[1] for r in rssis]
             rssi1 = float(np.mean(r1_vals))
             diff = rssi0 - rssi1
             delta = cfg["rssi_delta"]
