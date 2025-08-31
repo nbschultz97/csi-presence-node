@@ -1,6 +1,7 @@
 """Realtime CSI presence pipeline."""
 import time
 import yaml
+import sys
 from pathlib import Path
 from collections import deque
 import numpy as np
@@ -10,15 +11,10 @@ from . import utils
 
 
 class CSILogHandler(FileSystemEventHandler):
-    def __init__(self, path: Path, buffer, process_cb, wait: float = 5.0):
+    def __init__(self, path: Path, buffer, process_cb):
         self.path = str(path)
         self.buffer = buffer
         self.process_cb = process_cb
-        p = Path(path)
-        if not p.exists() and not utils.wait_for_file(p, wait):
-            raise FileNotFoundError(
-                f"Log file {p} not found. Run scripts/10_csi_capture.sh first."
-            )
         self._fp = open(self.path, "r")
         self._fp.seek(0, 2)
 
@@ -111,11 +107,14 @@ def run(config_path: str = "csi_node/config.yaml") -> None:
 
     observer = Observer()
     log_path = Path(cfg["log_file"])
-    try:
-        handler = CSILogHandler(log_path, buffer, process, cfg.get("log_wait", 5.0))
-    except FileNotFoundError as e:
-        print(e)
+    wait = cfg.get("log_wait", 5.0)
+    if not log_path.exists() and not utils.wait_for_file(log_path, wait):
+        print(
+            f"ERROR: log file {log_path} not found. Run scripts/10_csi_capture.sh first.",
+            file=sys.stderr,
+        )
         return
+    handler = CSILogHandler(log_path, buffer, process)
     observer.schedule(handler, str(log_path.parent), recursive=False)
     observer.start()
     try:
@@ -133,12 +132,13 @@ def run_offline(log_path: str, cfg: dict):
         baseline = np.load(cfg["baseline_file"])["mean"]
     rows = []
     log_path = Path(log_path)
-    if not log_path.exists() and not utils.wait_for_file(
-        log_path, cfg.get("log_wait", 5.0)
-    ):
-        raise FileNotFoundError(
-            f"Log file {log_path} not found. Run scripts/10_csi_capture.sh first."
+    wait = cfg.get("log_wait", 5.0)
+    if not log_path.exists() and not utils.wait_for_file(log_path, wait):
+        msg = (
+            f"ERROR: log file {log_path} not found. Run scripts/10_csi_capture.sh first."
         )
+        print(msg, file=sys.stderr)
+        raise FileNotFoundError(msg)
     with open(log_path, "r") as f:
         for line in f:
             pkt = utils.parse_csi_line(line)
