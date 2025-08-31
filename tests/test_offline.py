@@ -1,9 +1,9 @@
 """Offline pipeline test for sample.log.
 
 The log contains 10 packets: five baseline frames followed by five frames
-with higher variance and a left RSSI bias. We expect five presence events and
-four "L" direction labels (no "R" events) when processed with the default
-configuration.
+with higher variance and a left RSSI bias. We expect the presence flag to
+be set on five frames and the direction distribution to be {"C": 6, "L": 4,
+"R": 0} when processed with the default configuration.
 """
 
 import argparse
