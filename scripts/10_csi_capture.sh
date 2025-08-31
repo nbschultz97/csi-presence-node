@@ -3,7 +3,7 @@ set -euo pipefail
 
 FEITCSI_BIN=${FEITCSI_BIN:-feitcsi}
 
-if ! [ -x "$FEITCSI_BIN" ] && ! command -v "$FEITCSI_BIN" >/dev/null 2>&1; then
+if ! { [ -x "$FEITCSI_BIN" ] || command -v "$FEITCSI_BIN" >/dev/null 2>&1; }; then
   echo "FeitCSI binary not found; set FEITCSI_BIN=/path/to/feitcsi" >&2
   exit 1
 fi
