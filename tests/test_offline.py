@@ -16,15 +16,18 @@ import yaml
 from csi_node import pipeline
 
 
+EXPECTED_PRESENCE_COUNT = 5
+EXPECTED_DIRECTION_COUNTS = {"C": 6, "L": 4, "R": 0}
+
+
 def _run(print_metrics: bool = False) -> None:
     """Run pipeline on sample.log and optionally print summary metrics."""
     cfg = yaml.safe_load(open("csi_node/config.yaml"))
     df = pipeline.run_offline("tests/data/sample.log", cfg)
 
-    # presence==1 should occur once per motion frame (five total)
+    # presence==1 should occur once per motion frame
     presence_count = int(df["presence"].eq(1).sum())
-
-    # Direction labels should be 6 "C" frames and 4 "L" frames; no "R"
+    # Direction label distribution
     direction_counts = df["direction"].value_counts().to_dict()
 
     if print_metrics:
@@ -32,10 +35,15 @@ def _run(print_metrics: bool = False) -> None:
         print("presence==1:", presence_count)
         print("direction counts:", direction_counts)
 
-    assert presence_count == 5
-    assert direction_counts.get("L", 0) == 4
-    assert direction_counts.get("C", 0) == 6
-    assert direction_counts.get("R", 0) == 0
+    assert (
+        presence_count == EXPECTED_PRESENCE_COUNT
+    ), f"expected {EXPECTED_PRESENCE_COUNT} presence events, got {presence_count}"
+
+    for label, expected in EXPECTED_DIRECTION_COUNTS.items():
+        observed = direction_counts.get(label, 0)
+        assert (
+            observed == expected
+        ), f"expected {expected} '{label}' direction frames, got {observed}"
 
 
 def test_offline() -> None:
