@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CHANNEL=${1:-36}
-WIDTH=${2:-80}
-LOG=./data/csi_raw.log
 FEITCSI_BIN=${FEITCSI_BIN:-feitcsi}
 
 if ! [ -x "$FEITCSI_BIN" ] && ! command -v "$FEITCSI_BIN" >/dev/null 2>&1; then
   echo "FeitCSI binary not found; set FEITCSI_BIN=/path/to/feitcsi" >&2
   exit 1
 fi
+
+CHANNEL=${1:-36}
+WIDTH=${2:-80}
+LOG=./data/csi_raw.log
 
 mkdir -p ./data
 
