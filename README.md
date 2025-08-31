@@ -5,8 +5,8 @@ Minimal CSI presence logger for Intel AX210 using FeitCSI.
 ## Setup
 
 1. Install dependencies and verify driver. The script installs into the
-   active virtual environment when `VIRTUAL_ENV` is set; otherwise it uses
-   `pip --user`:
+   active virtual environment or any Python with a PEP 668
+   `EXTERNALLY-MANAGED` marker; otherwise it uses `pip --user`:
    ```bash
    scripts/00_install_deps.sh
    ```
