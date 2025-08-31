@@ -1,0 +1,11 @@
+channel: 36
+bandwidth: 80
+window_size: 1.0      # seconds
+window_hop: 0.5       # seconds
+variance_threshold: 5.0
+pca_threshold: 1.0
+rssi_delta: 2.0       # dB
+baseline_file: ./data/baseline.npz
+log_file: ./data/csi_raw.log
+output_file: ./data/presence_log.csv
+rotation_max_bytes: 1048576
