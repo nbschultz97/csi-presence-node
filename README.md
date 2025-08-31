@@ -8,15 +8,19 @@ Minimal CSI presence logger for Intel AX210 using FeitCSI.
    ```bash
    scripts/00_install_deps.sh
    ```
-2. Start CSI capture (channel 36 / 80 MHz by default):
+2. Ensure the FeitCSI binary is installed. If it's not on your `PATH`, export `FEITCSI_BIN` to its absolute path:
+   ```bash
+   export FEITCSI_BIN=/path/to/feitcsi
+   ```
+3. Start CSI capture (channel 36 / 80 MHz by default):
    ```bash
    scripts/10_csi_capture.sh 36 80
    ```
-3. In an empty room, record baseline:
+4. In an empty room, record baseline:
    ```bash
    python -m csi_node.baseline --duration 60
    ```
-4. Run the realtime pipeline:
+5. Run the realtime pipeline:
    ```bash
    python -m csi_node.pipeline
    ```
