@@ -2,6 +2,7 @@ import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 import numpy as np
 import yaml
+import pytest
 from csi_node import pipeline
 
 
@@ -14,4 +15,5 @@ def test_single_chain_rssi():
     result = pipeline.compute_window(buffer, 0.0, 0.1, None, cfg)
     assert result["direction"] == "C"
     assert np.isnan(result["rssi1"])
+    assert result["rssi0"] == pytest.approx(-40.5)
 
