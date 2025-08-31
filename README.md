@@ -16,6 +16,9 @@ Minimal CSI presence logger for Intel AX210 using FeitCSI.
    ```bash
    scripts/10_csi_capture.sh 36 80
    ```
+   The script checks that `FEITCSI_BIN` points to an executable and exits with
+   `FeitCSI binary not found; set FEITCSI_BIN=/path/to/feitcsi` if it cannot
+   be located.
 4. In an empty room, record baseline:
    ```bash
    python -m csi_node.baseline --duration 60
