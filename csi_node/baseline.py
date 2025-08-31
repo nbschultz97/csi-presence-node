@@ -6,7 +6,12 @@ from pathlib import Path
 from . import utils
 
 
-def record(log_path: Path, duration: float, outfile: Path) -> None:
+def record(log_path: Path, duration: float, outfile: Path, wait: float = 5.0) -> None:
+    if not utils.wait_for_file(log_path, wait):
+        print(
+            f"ERROR: log file {log_path} not found. Start scripts/10_csi_capture.sh first."
+        )
+        return
     start = time.time()
     amps = []
     with open(log_path, "r") as f:
@@ -30,8 +35,9 @@ def main() -> None:
     ap.add_argument("--log", default="./data/csi_raw.log")
     ap.add_argument("--duration", type=float, default=60.0)
     ap.add_argument("--out", default="./data/baseline.npz")
+    ap.add_argument("--wait", type=float, default=5.0, help="seconds to wait for log file")
     args = ap.parse_args()
-    record(Path(args.log), args.duration, Path(args.out))
+    record(Path(args.log), args.duration, Path(args.out), wait=args.wait)
 
 
 if __name__ == "__main__":

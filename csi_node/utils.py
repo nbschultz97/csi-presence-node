@@ -4,6 +4,8 @@ import json
 import os
 import fcntl
 import tempfile
+import time
+from pathlib import Path
 import numpy as np
 from typing import List, Optional
 from scipy.signal import savgol_filter as _savgol_filter
@@ -63,6 +65,17 @@ def rotate_file(path: str, max_bytes: int) -> None:
         if os.path.exists(src):
             os.rename(src, dst)
     os.rename(path, f"{path}.1")
+
+
+def wait_for_file(path: Path | str, timeout: float = 5.0, interval: float = 0.5) -> bool:
+    """Poll for a file to appear up to ``timeout`` seconds."""
+    p = Path(path)
+    end = time.time() + timeout
+    while time.time() < end:
+        if p.exists():
+            return True
+        time.sleep(interval)
+    return p.exists()
 
 
 def parse_csi_line(line: str) -> Optional[dict]:
