@@ -14,9 +14,10 @@ class CSILogHandler(FileSystemEventHandler):
         self.path = str(path)
         self.buffer = buffer
         self.process_cb = process_cb
-        if not utils.wait_for_file(path, wait):
+        p = Path(path)
+        if not p.exists() and not utils.wait_for_file(p, wait):
             raise FileNotFoundError(
-                f"Log file {path} not found. Start scripts/10_csi_capture.sh first."
+                f"Log file {p} not found. Run scripts/10_csi_capture.sh first."
             )
         self._fp = open(self.path, "r")
         self._fp.seek(0, 2)
@@ -104,14 +105,13 @@ def run(config_path: str = "csi_node/config.yaml") -> None:
             utils.safe_csv_append(cfg["output_file"], row)
 
     observer = Observer()
+    log_path = Path(cfg["log_file"])
     try:
-        handler = CSILogHandler(
-            Path(cfg["log_file"]), buffer, process, cfg.get("log_wait", 5.0)
-        )
+        handler = CSILogHandler(log_path, buffer, process, cfg.get("log_wait", 5.0))
     except FileNotFoundError as e:
         print(e)
         return
-    observer.schedule(handler, str(Path(cfg["log_file"]).parent), recursive=False)
+    observer.schedule(handler, str(log_path.parent), recursive=False)
     observer.start()
     try:
         while True:
@@ -128,9 +128,11 @@ def run_offline(log_path: str, cfg: dict):
         baseline = np.load(cfg["baseline_file"])["mean"]
     rows = []
     log_path = Path(log_path)
-    if not utils.wait_for_file(log_path, cfg.get("log_wait", 5.0)):
+    if not log_path.exists() and not utils.wait_for_file(
+        log_path, cfg.get("log_wait", 5.0)
+    ):
         raise FileNotFoundError(
-            f"Log file {log_path} not found. Start scripts/10_csi_capture.sh first."
+            f"Log file {log_path} not found. Run scripts/10_csi_capture.sh first."
         )
     with open(log_path, "r") as f:
         for line in f:
