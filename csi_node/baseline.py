@@ -10,12 +10,13 @@ from . import utils
 def record(log_path: Path, duration: float, outfile: Path, wait: float = 5.0) -> None:
     """Capture a baseline CSI sample when the log file is available."""
     log_path = Path(log_path)
-    if not log_path.exists() and not utils.wait_for_file(log_path, wait):
-        print(
-            f"ERROR: log file {log_path} not found. Run scripts/10_csi_capture.sh first.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    if not log_path.exists():
+        if not utils.wait_for_file(log_path, wait):
+            print(
+                f"ERROR: log file {log_path} not found. Run scripts/10_csi_capture.sh first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     start = time.time()
     amps = []
     with open(log_path, "r") as f:
