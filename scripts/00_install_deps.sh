@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install Python dependencies
+# Install Python dependencies. If executed inside a virtual environment
+# (VIRTUAL_ENV is set), install packages into it; otherwise fall back to a
+# per-user installation via --user.
 PYTHON=${PYTHON:-python3}
-${PYTHON} -m pip install --user --upgrade numpy scipy pandas csikit watchdog pyyaml >/dev/null
+PIP_FLAGS=(--upgrade)
+if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+  PIP_FLAGS=(--user "${PIP_FLAGS[@]}")
+fi
+${PYTHON} -m pip install "${PIP_FLAGS[@]}" numpy scipy pandas csikit watchdog pyyaml >/dev/null
 
 echo "Kernel: $(uname -r)"
 if lsmod | grep -q iwlwifi; then
