@@ -1,5 +1,6 @@
 """Record empty-room baseline for CSI amplitudes."""
 import argparse
+import sys
 import time
 import numpy as np
 from pathlib import Path
@@ -11,9 +12,10 @@ def record(log_path: Path, duration: float, outfile: Path, wait: float = 5.0) ->
     log_path = Path(log_path)
     if not log_path.exists() and not utils.wait_for_file(log_path, wait):
         print(
-            f"ERROR: log file {log_path} not found. Run scripts/10_csi_capture.sh first."
+            f"ERROR: log file {log_path} not found. Run scripts/10_csi_capture.sh first.",
+            file=sys.stderr,
         )
-        return
+        sys.exit(1)
     start = time.time()
     amps = []
     with open(log_path, "r") as f:
