@@ -32,6 +32,8 @@ Minimal CSI presence logger for Intel AX210 using FeitCSI.
    ```bash
    python -m csi_node.pipeline
    ```
+   The pipeline aborts with `Run scripts/10_csi_capture.sh first` if the CSI
+   log file is missing.
 
 Output is written to `./data/presence_log.csv`.
 

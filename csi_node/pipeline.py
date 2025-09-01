@@ -12,6 +12,9 @@ from . import utils
 
 class CSILogHandler(FileSystemEventHandler):
     def __init__(self, path: Path, buffer, process_cb):
+        if not path.exists():
+            msg = "Run scripts/10_csi_capture.sh first"
+            raise FileNotFoundError(msg)
         self.path = str(path)
         self.buffer = buffer
         self.process_cb = process_cb

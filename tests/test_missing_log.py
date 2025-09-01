@@ -35,3 +35,20 @@ def test_pipeline_run_missing_file(tmp_path, capsys):
         pipeline.run(str(cfg_path))
     captured = capsys.readouterr()
     assert "Run scripts/10_csi_capture.sh first" in captured.err
+
+
+def test_pipeline_run_missing_file_after_wait(tmp_path, monkeypatch):
+    cfg = yaml.safe_load(open("csi_node/config.yaml"))
+    cfg["log_file"] = str(tmp_path / "missing.log")
+    cfg["log_wait"] = 0
+
+    # Force pipeline.run to proceed without the log existing
+    monkeypatch.setattr(pipeline.utils, "wait_for_file", lambda p, w: True)
+
+    cfg_path = tmp_path / "cfg.yaml"
+    with open(cfg_path, "w") as f:
+        yaml.safe_dump(cfg, f)
+
+    with pytest.raises(FileNotFoundError) as exc:
+        pipeline.run(str(cfg_path))
+    assert "Run scripts/10_csi_capture.sh first" in str(exc.value)
