@@ -19,7 +19,8 @@ Minimal CSI presence logger for Intel AX210 using FeitCSI.
    scripts/10_csi_capture.sh 36 80 LDPC
    ```
    The third argument or `FEITCSI_CODING` env var selects the coding scheme
-   (`LDPC` or `BCC`). On launch the script checks `[ -x "$FEITCSI_BIN" ]` or
+   (`LDPC` or `BCC`), which the script forwards to FeitCSI via `--coding`.
+   On launch the script checks `[ -x "$FEITCSI_BIN" ]` or
    `command -v "$FEITCSI_BIN"` to ensure the binary is available. If
    missing, it prints `FeitCSI binary not found; set
    FEITCSI_BIN=/path/to/feitcsi` and exits non-zero.

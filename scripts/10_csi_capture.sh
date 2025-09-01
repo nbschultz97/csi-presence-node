@@ -17,4 +17,4 @@ mkdir -p ./data
 
 echo "Starting FeitCSI capture on channel $CHANNEL width $WIDTH MHz coding $CODING"
 # Placeholder command; replace with actual FeitCSI binary if needed
-$FEITCSI_BIN -c "$CHANNEL" -w "$WIDTH" -C "$CODING" -o "$LOG"
+$FEITCSI_BIN -c "$CHANNEL" -w "$WIDTH" --coding "$CODING" -o "$LOG"
