@@ -109,11 +109,8 @@ def run(config_path: str = "csi_node/config.yaml") -> None:
     log_path = Path(cfg["log_file"])
     wait = cfg.get("log_wait", 5.0)
     if not log_path.exists() and not utils.wait_for_file(log_path, wait):
-        print(
-            f"ERROR: log file {log_path} not found. Run scripts/10_csi_capture.sh first.",
-            file=sys.stderr,
-        )
-        return
+        print("Run scripts/10_csi_capture.sh first", file=sys.stderr)
+        sys.exit(1)
     handler = CSILogHandler(log_path, buffer, process)
     observer.schedule(handler, str(log_path.parent), recursive=False)
     observer.start()
@@ -134,9 +131,7 @@ def run_offline(log_path: str, cfg: dict):
     log_path = Path(log_path)
     wait = cfg.get("log_wait", 5.0)
     if not log_path.exists() and not utils.wait_for_file(log_path, wait):
-        msg = (
-            f"ERROR: log file {log_path} not found. Run scripts/10_csi_capture.sh first."
-        )
+        msg = "Run scripts/10_csi_capture.sh first"
         print(msg, file=sys.stderr)
         raise FileNotFoundError(msg)
     with open(log_path, "r") as f:
