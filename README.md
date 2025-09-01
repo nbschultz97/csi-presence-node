@@ -14,11 +14,12 @@ Minimal CSI presence logger for Intel AX210 using FeitCSI.
    ```bash
    export FEITCSI_BIN=/path/to/feitcsi
    ```
-3. Start CSI capture (channel 36 / 80 MHz by default):
+3. Start CSI capture (channel 36 / 80 MHz / BCC coding by default):
    ```bash
-   scripts/10_csi_capture.sh 36 80
+   scripts/10_csi_capture.sh 36 80 LDPC
    ```
-   On launch the script checks `[ -x "$FEITCSI_BIN" ]` or
+   The third argument or `FEITCSI_CODING` env var selects the coding scheme
+   (`LDPC` or `BCC`). On launch the script checks `[ -x "$FEITCSI_BIN" ]` or
    `command -v "$FEITCSI_BIN"` to ensure the binary is available. If
    missing, it prints `FeitCSI binary not found; set
    FEITCSI_BIN=/path/to/feitcsi` and exits non-zero.

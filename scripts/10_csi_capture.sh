@@ -10,10 +10,11 @@ fi
 
 CHANNEL=${1:-36}
 WIDTH=${2:-80}
+CODING=${3:-${FEITCSI_CODING:-BCC}}
 LOG=./data/csi_raw.log
 
 mkdir -p ./data
 
-echo "Starting FeitCSI capture on channel $CHANNEL width $WIDTH MHz"
+echo "Starting FeitCSI capture on channel $CHANNEL width $WIDTH MHz coding $CODING"
 # Placeholder command; replace with actual FeitCSI binary if needed
-$FEITCSI_BIN -c "$CHANNEL" -w "$WIDTH" -o "$LOG"
+$FEITCSI_BIN -c "$CHANNEL" -w "$WIDTH" -C "$CODING" -o "$LOG"
