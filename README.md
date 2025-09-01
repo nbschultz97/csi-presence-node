@@ -52,3 +52,9 @@ python tests/test_offline.py
 * Walk in front for 30 s ⇒ `presence` flips to `1` for most windows.
 * Stand left/right/center of antenna ⇒ `direction` mostly `L`/`R`/`C` respectively.
 * CPU < 20% on one core at 10 Hz windows, memory stable.
+
+## Troubleshooting
+
+If the baseline recorder or pipeline prints `Run scripts/10_csi_capture.sh first`,
+start CSI capture with `scripts/10_csi_capture.sh` so the log file exists before
+retrying.
