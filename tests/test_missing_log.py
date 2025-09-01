@@ -10,10 +10,9 @@ from csi_node import baseline, pipeline
 def test_baseline_missing_file(tmp_path, capsys):
     missing = tmp_path / "missing.log"
     out = tmp_path / "out.npz"
-    with pytest.raises(SystemExit):
-        baseline.record(missing, duration=0.1, outfile=out, wait=0)
+    baseline.record(missing, duration=0.1, outfile=out, wait=0)
     captured = capsys.readouterr()
-    assert "Run scripts/10_csi_capture.sh first" in captured.err
+    assert "Run scripts/10_csi_capture.sh first" in captured.out
 
 
 def test_run_offline_missing_file(tmp_path):
