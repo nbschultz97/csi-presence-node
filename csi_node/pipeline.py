@@ -47,21 +47,17 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
     rssi0 = rssi1 = float("nan")
     direction = "C"
     rssis = [p.get("rssi") for p in window if p.get("rssi")]
-    if rssis:
-        r0_vals = [r[0] for r in rssis if len(r) >= 1]
-        if r0_vals:
-            rssi0 = float(np.mean(r0_vals))
-        if all(len(r) >= 2 for r in rssis):
-            r1_vals = [r[1] for r in rssis]
-            rssi1 = float(np.mean(r1_vals))
-            diff = rssi0 - rssi1
-            delta = cfg["rssi_delta"]
-            if diff > delta:
-                direction = "L"
-            elif diff < -delta:
-                direction = "R"
-        else:
-            direction = "C"
+    if rssis and all(len(r) >= 2 for r in rssis):
+        r0_vals = [r[0] for r in rssis]
+        r1_vals = [r[1] for r in rssis]
+        rssi0 = float(np.mean(r0_vals))
+        rssi1 = float(np.mean(r1_vals))
+        diff = rssi0 - rssi1
+        delta = cfg["rssi_delta"]
+        if diff > delta:
+            direction = "L"
+        elif diff < -delta:
+            direction = "R"
     presence = int(var > cfg["variance_threshold"] or pca1 > cfg["pca_threshold"])
     return {
         "presence": presence,

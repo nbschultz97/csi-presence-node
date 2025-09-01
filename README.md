@@ -40,6 +40,8 @@ Output is written to `./data/presence_log.csv`.
 ## Configuration
 
 Edit `csi_node/config.yaml` for thresholds, windows, and file paths. Baseline and output files rotate when exceeding 1 MB.
+If the capture reports only a single RSSI chain, the pipeline records `NaN`
+for `rssi0`/`rssi1` and defaults the direction label to `C`.
 
 ## Tests
 

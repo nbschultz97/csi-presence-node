@@ -14,8 +14,8 @@ def test_single_chain_rssi():
     ]
     result = pipeline.compute_window(buffer, 0.0, 0.1, None, cfg)
     assert result["direction"] == "C"
+    assert np.isnan(result["rssi0"])
     assert np.isnan(result["rssi1"])
-    assert result["rssi0"] == pytest.approx(-40.5)
 
 
 def test_mixed_chain_defaults_center():
@@ -26,5 +26,6 @@ def test_mixed_chain_defaults_center():
     ]
     result = pipeline.compute_window(buffer, 0.0, 0.1, None, cfg)
     assert result["direction"] == "C"
+    assert np.isnan(result["rssi0"])
     assert np.isnan(result["rssi1"])
 
