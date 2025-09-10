@@ -20,29 +20,38 @@ class CSILogHandler(FileSystemEventHandler):
         self.buffer = buffer
         self.process_cb = process_cb
         self._fp = open(self.path, "r")
+        # Start tailing from end of current file contents
         self._fp.seek(0, 2)
-        self._inode = os.fstat(self._fp.fileno()).st_ino
+        stat = os.fstat(self._fp.fileno())
+        self._inode = stat.st_ino
+        self._size = stat.st_size
 
     def on_modified(self, event):
         if event.src_path != self.path:
             return
 
         try:
-            inode = os.stat(self.path).st_ino
+            stat = os.stat(self.path)
+            inode, size = stat.st_ino, stat.st_size
         except FileNotFoundError:
-            inode = None
+            return
 
-        if inode != self._inode:
+        if inode != self._inode or size < self._size:
+            # Log rotated or truncated: reopen from start
             try:
                 self._fp.close()
             except Exception:
                 pass
             try:
                 self._fp = open(self.path, "r")
-                self._fp.seek(0, 2)
-                self._inode = os.stat(self.path).st_ino
+                self._fp.seek(0)
+                stat = os.fstat(self._fp.fileno())
+                self._inode = stat.st_ino
+                self._size = 0
             except FileNotFoundError:
                 return
+        else:
+            self._size = size
 
         while True:
             line = self._fp.readline()
@@ -52,6 +61,7 @@ class CSILogHandler(FileSystemEventHandler):
             if pkt:
                 self.buffer.append(pkt)
                 self.process_cb()
+        self._size = self._fp.tell()
 
 
 def compute_window(buffer, start_ts, end_ts, baseline, cfg):
