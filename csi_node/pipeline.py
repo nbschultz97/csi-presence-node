@@ -90,6 +90,12 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
 
     amps = np.stack([p["csi"] for p in valid], axis=0)
     if baseline is not None:
+        if baseline.shape != amps.shape[1:]:
+            msg = (
+                f"Baseline shape {baseline.shape} does not match "
+                f"amplitude shape {amps.shape[1:]}"
+            )
+            raise ValueError(msg)
         amps = amps - baseline
     amps = amps.reshape(amps.shape[0], -1)
     var = float(np.var(amps))
