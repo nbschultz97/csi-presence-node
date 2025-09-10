@@ -38,7 +38,37 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
     window = [p for p in buffer if start_ts <= p["ts"] <= end_ts]
     if not window:
         return None
-    amps = np.stack([p["csi"] for p in window], axis=0)
+
+    dropped = 0
+    valid = []
+    expected_shape = baseline.shape if baseline is not None else None
+    for pkt in window:
+        csi = pkt.get("csi")
+        if csi is None or csi.size == 0:
+            dropped += 1
+            continue
+        if expected_shape is None:
+            expected_shape = csi.shape
+        if csi.shape != expected_shape:
+            dropped += 1
+            continue
+        valid.append(pkt)
+
+    if not valid:
+        if dropped and cfg.get("log_dropped", False):
+            print(
+                f"Dropped {dropped} packets with empty or mismatched CSI",
+                file=sys.stderr,
+            )
+        return None
+
+    if dropped and cfg.get("log_dropped", False):
+        print(
+            f"Dropped {dropped} packets with empty or mismatched CSI",
+            file=sys.stderr,
+        )
+
+    amps = np.stack([p["csi"] for p in valid], axis=0)
     if baseline is not None:
         amps = amps - baseline
     amps = amps.reshape(amps.shape[0], -1)
@@ -46,7 +76,7 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
     pca1 = float(utils.compute_pca(amps)[0])
     rssi0 = rssi1 = float("nan")
     direction = "C"
-    rssis = [p.get("rssi") for p in window if p.get("rssi")]
+    rssis = [p.get("rssi") for p in valid if p.get("rssi")]
     if rssis and all(len(r) >= 2 for r in rssis):
         r0_vals = [r[0] for r in rssis]
         r1_vals = [r[1] for r in rssis]
