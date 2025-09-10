@@ -8,13 +8,27 @@ if ! { [ -x "$FEITCSI_BIN" ] || command -v "$FEITCSI_BIN" >/dev/null 2>&1; }; th
   exit 1
 fi
 
+channel_to_freq() {
+  local ch=$1
+  local freq
+  if (( ch >= 1 && ch <= 13 )); then
+    freq=$((2407 + ch * 5))
+  elif (( ch == 14 )); then
+    freq=2484
+  else
+    freq=$((5000 + ch * 5))
+  fi
+  echo "$freq"
+}
+
 CHANNEL=${1:-36}
 WIDTH=${2:-80}
 CODING=${3:-${FEITCSI_CODING:-BCC}}
+CODING=${CODING^^}
 LOG=./data/csi_raw.log
 
 mkdir -p ./data
 
-echo "Starting FeitCSI capture on channel $CHANNEL width $WIDTH MHz coding $CODING"
-# Placeholder command; replace with actual FeitCSI binary if needed
-$FEITCSI_BIN -c "$CHANNEL" -w "$WIDTH" --coding "$CODING" -o "$LOG"
+freq=$(channel_to_freq "$CHANNEL")
+echo "Starting FeitCSI capture on channel $CHANNEL (${freq} MHz) width $WIDTH MHz coding $CODING"
+$FEITCSI_BIN -f "$freq" -w "$WIDTH" --coding "$CODING" -o "$LOG"
