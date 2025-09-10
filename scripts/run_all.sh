@@ -21,9 +21,31 @@ trap cleanup EXIT
 CAPTURE_PID=$!
 
 echo "Waiting for $LOG_FILE..."
-while [[ ! -f "$LOG_FILE" ]]; do
+while [[ ! -s "$LOG_FILE" ]]; do
+  if ! kill -0 "$CAPTURE_PID" 2>/dev/null; then
+    echo "FeitCSI exited before log was ready" >&2
+    wait "$CAPTURE_PID" 2>/dev/null || true
+    exit 1
+  fi
   sleep 1
 done
 
+set +e
 python3 -m csi_node.baseline
+BASELINE_EXIT=$?
 python3 -m csi_node.pipeline
+PIPELINE_EXIT=$?
+set -e
+
+if [[ $BASELINE_EXIT -ne 0 ]]; then
+  echo "Baseline exited with code $BASELINE_EXIT" >&2
+fi
+if [[ $PIPELINE_EXIT -ne 0 ]]; then
+  echo "Pipeline exited with code $PIPELINE_EXIT" >&2
+fi
+
+if [[ $BASELINE_EXIT -ne 0 ]]; then
+  exit "$BASELINE_EXIT"
+elif [[ $PIPELINE_EXIT -ne 0 ]]; then
+  exit "$PIPELINE_EXIT"
+fi
