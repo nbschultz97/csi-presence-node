@@ -16,7 +16,7 @@ sys.exit(0 if marker.exists() else 1)
 PY
   echo "Detected PEP 668 EXTERNALLY-MANAGED; using --user install" >&2
 fi
-${PYTHON} -m pip install "${PIP_FLAGS[@]}" numpy scipy pandas csikit watchdog pyyaml >/dev/null
+${PYTHON} -m pip install "${PIP_FLAGS[@]}" numpy scipy pandas scikit-learn watchdog pyyaml >/dev/null
 
 echo "Kernel: $(uname -r)"
 if lsmod | grep -q iwlwifi; then
