@@ -3,8 +3,20 @@ set -euo pipefail
 
 FEITCSI_BIN=${FEITCSI_BIN:-feitcsi}
 
-if ! { [ -x "$FEITCSI_BIN" ] || command -v "$FEITCSI_BIN" >/dev/null 2>&1; }; then
-  echo "FeitCSI binary not found; set FEITCSI_BIN=/path/to/feitcsi" >&2
+echo "FEITCSI_BIN is set to '$FEITCSI_BIN'"
+
+if [ -e "$FEITCSI_BIN" ]; then
+  if [ ! -x "$FEITCSI_BIN" ]; then
+    echo "FeitCSI binary exists at '$FEITCSI_BIN' but is not executable" >&2
+    echo "Fix permissions or set FEITCSI_BIN to an executable binary" >&2
+    exit 1
+  fi
+elif bin_path=$(command -v "$FEITCSI_BIN" 2>/dev/null); then
+  FEITCSI_BIN="$bin_path"
+  echo "Resolved FeitCSI binary to '$FEITCSI_BIN'"
+else
+  echo "FeitCSI binary not found or not executable (FEITCSI_BIN='$FEITCSI_BIN')" >&2
+  echo "Run 'which feitcsi' or install it at /usr/local/bin/feitcsi" >&2
   exit 1
 fi
 
