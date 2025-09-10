@@ -35,8 +35,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 WHEEL_DIR=${WHEEL_DIR:-$WHEEL_DIR_ENV}
+OFFLINE=${OFFLINE:-0}
 if [[ -n "${WHEEL_DIR}" ]]; then
-  PIP_FLAGS+=(--no-index --find-links "$WHEEL_DIR")
+  if [[ -d "${WHEEL_DIR}" ]]; then
+    PIP_FLAGS+=(--no-index --find-links "$WHEEL_DIR")
+  else
+    echo "Warning: wheel directory '${WHEEL_DIR}' not found" >&2
+    if [[ "${OFFLINE}" != "0" ]]; then
+      echo "Offline mode set; aborting" >&2
+      exit 1
+    else
+      echo "Falling back to PyPI" >&2
+    fi
+  fi
 fi
 
 ${PYTHON} -m pip install "${PIP_FLAGS[@]}" -r "$REQ_FILE" >/dev/null
