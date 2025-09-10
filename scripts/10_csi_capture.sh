@@ -33,8 +33,22 @@ mkdir -p ./data
 freq=$(channel_to_freq "$CHANNEL")
 echo "Starting FeitCSI capture on channel $CHANNEL (${freq} MHz) width $WIDTH MHz coding $CODING" | tee -a "$STDLOG"
 
-set +e
-$FEITCSI_BIN -f "$freq" -w "$WIDTH" --coding "$CODING" -o "$LOG" 2>&1 | tee -a "$STDLOG"
-exit_code=${PIPESTATUS[0]}
-set -e
-exit $exit_code
+tmp_err=$(mktemp)
+(
+  "$FEITCSI_BIN" -f "$freq" -w "$WIDTH" --coding "$CODING" -o "$LOG" \
+    2> >(tee "$tmp_err" | tee -a "$STDLOG" >&2) | tee -a "$STDLOG"
+) &
+feitcsi_pid=$!
+
+sleep 1
+if [[ ! -s "$LOG" ]]; then
+  echo "FeitCSI failed to produce $LOG" >&2
+  cat "$tmp_err" >&2 || true
+  kill "$feitcsi_pid" 2>/dev/null || true
+  wait "$feitcsi_pid" 2>/dev/null || true
+  rm -f "$tmp_err"
+  exit 1
+fi
+
+rm -f "$tmp_err"
+wait "$feitcsi_pid"
