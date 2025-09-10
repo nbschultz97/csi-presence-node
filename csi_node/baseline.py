@@ -6,13 +6,29 @@ import numpy as np
 from pathlib import Path
 from . import utils
 
+CAPTURE_EXIT_CODE = 2
+STALE_THRESHOLD = 5.0
+_ERR_MSG = (
+    "CSI capture not running or log idle. Start scripts/10_csi_capture.sh and retry."
+)
+
+
+def _capture_fail() -> None:
+    print(_ERR_MSG, file=sys.stderr)
+    sys.exit(CAPTURE_EXIT_CODE)
+
+
+def _check_log_fresh(path: Path) -> None:
+    if not path.exists() or time.time() - path.stat().st_mtime > STALE_THRESHOLD:
+        _capture_fail()
+
 
 def record(log_path: Path, duration: float, outfile: Path, wait: float = 5.0) -> None:
     """Capture a baseline CSI sample when the log file is available."""
     log_path = Path(log_path)
     if not utils.wait_for_file(log_path, wait):
-        print("Run scripts/10_csi_capture.sh first", file=sys.stderr)
-        sys.exit(1)
+        _capture_fail()
+    _check_log_fresh(log_path)
     start = time.time()
     amps = []
     with open(log_path, "r") as f:

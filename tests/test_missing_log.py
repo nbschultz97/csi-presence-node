@@ -1,19 +1,24 @@
 import sys
 import pathlib
+import os
+import time
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
 import yaml
 import pytest
 from csi_node import baseline, pipeline
 
+ERR_MSG = "CSI capture not running or log idle"
+
 
 def test_baseline_missing_file(tmp_path, capsys):
     missing = tmp_path / "missing.log"
     out = tmp_path / "out.npz"
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         baseline.record(missing, duration=0.1, outfile=out, wait=0)
     captured = capsys.readouterr()
-    assert "Run scripts/10_csi_capture.sh first" in captured.err
+    assert ERR_MSG in captured.err
+    assert exc.value.code == baseline.CAPTURE_EXIT_CODE
 
 
 def test_run_offline_missing_file(tmp_path):
@@ -22,7 +27,7 @@ def test_run_offline_missing_file(tmp_path):
     missing = tmp_path / "missing.log"
     with pytest.raises(FileNotFoundError) as exc:
         pipeline.run_offline(missing, cfg)
-    assert "Run scripts/10_csi_capture.sh first" in str(exc.value)
+    assert ERR_MSG in str(exc.value)
 
 
 def test_pipeline_run_missing_file(tmp_path, capsys):
@@ -32,13 +37,14 @@ def test_pipeline_run_missing_file(tmp_path, capsys):
     cfg_path = tmp_path / "cfg.yaml"
     with open(cfg_path, "w") as f:
         yaml.safe_dump(cfg, f)
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         pipeline.run(str(cfg_path))
     captured = capsys.readouterr()
-    assert "Run scripts/10_csi_capture.sh first" in captured.err
+    assert ERR_MSG in captured.err
+    assert exc.value.code == pipeline.CAPTURE_EXIT_CODE
 
 
-def test_pipeline_run_missing_file_after_wait(tmp_path, monkeypatch):
+def test_pipeline_run_missing_file_after_wait(tmp_path, monkeypatch, capsys):
     cfg = yaml.safe_load(open("csi_node/config.yaml"))
     cfg["log_file"] = str(tmp_path / "missing.log")
     cfg["log_wait"] = 0
@@ -50,6 +56,39 @@ def test_pipeline_run_missing_file_after_wait(tmp_path, monkeypatch):
     with open(cfg_path, "w") as f:
         yaml.safe_dump(cfg, f)
 
-    with pytest.raises(FileNotFoundError) as exc:
+    with pytest.raises(SystemExit) as exc:
         pipeline.run(str(cfg_path))
-    assert "Run scripts/10_csi_capture.sh first" in str(exc.value)
+    captured = capsys.readouterr()
+    assert ERR_MSG in captured.err
+    assert exc.value.code == pipeline.CAPTURE_EXIT_CODE
+
+
+def test_baseline_stale_file(tmp_path, capsys):
+    log = tmp_path / "csi_raw.log"
+    log.write_text("")
+    old = time.time() - 10
+    os.utime(log, (old, old))
+    out = tmp_path / "out.npz"
+    with pytest.raises(SystemExit) as exc:
+        baseline.record(log, duration=0.1, outfile=out, wait=0)
+    captured = capsys.readouterr()
+    assert ERR_MSG in captured.err
+    assert exc.value.code == baseline.CAPTURE_EXIT_CODE
+
+
+def test_pipeline_run_stale_file(tmp_path, capsys):
+    log = tmp_path / "csi_raw.log"
+    log.write_text("")
+    old = time.time() - 10
+    os.utime(log, (old, old))
+    cfg = yaml.safe_load(open("csi_node/config.yaml"))
+    cfg["log_file"] = str(log)
+    cfg["log_wait"] = 0
+    cfg_path = tmp_path / "cfg.yaml"
+    with open(cfg_path, "w") as f:
+        yaml.safe_dump(cfg, f)
+    with pytest.raises(SystemExit) as exc:
+        pipeline.run(str(cfg_path))
+    captured = capsys.readouterr()
+    assert ERR_MSG in captured.err
+    assert exc.value.code == pipeline.CAPTURE_EXIT_CODE

@@ -10,12 +10,27 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from . import utils
 
+CAPTURE_EXIT_CODE = 2
+STALE_THRESHOLD = 5.0
+_ERR_MSG = (
+    "CSI capture not running or log idle. Start scripts/10_csi_capture.sh and retry."
+)
+
+
+def _capture_fail() -> None:
+    print(_ERR_MSG, file=sys.stderr)
+    sys.exit(CAPTURE_EXIT_CODE)
+
+
+def _check_log_fresh(path: Path) -> None:
+    if not path.exists() or time.time() - path.stat().st_mtime > STALE_THRESHOLD:
+        _capture_fail()
+
 
 class CSILogHandler(FileSystemEventHandler):
     def __init__(self, path: Path, buffer, process_cb):
         if not path.exists():
-            msg = "Run scripts/10_csi_capture.sh first"
-            raise FileNotFoundError(msg)
+            raise FileNotFoundError(_ERR_MSG)
         self.path = str(path)
         self.buffer = buffer
         self.process_cb = process_cb
@@ -174,8 +189,8 @@ def run(config_path: str = "csi_node/config.yaml") -> None:
     log_path = Path(cfg["log_file"])
     wait = cfg.get("log_wait", 5.0)
     if not log_path.exists() and not utils.wait_for_file(log_path, wait):
-        print("Run scripts/10_csi_capture.sh first", file=sys.stderr)
-        sys.exit(1)
+        _capture_fail()
+    _check_log_fresh(log_path)
     handler = CSILogHandler(log_path, buffer, process)
     observer.schedule(handler, str(log_path.parent), recursive=False)
     observer.start()
@@ -196,9 +211,8 @@ def run_offline(log_path: str, cfg: dict):
     log_path = Path(log_path)
     wait = cfg.get("log_wait", 5.0)
     if not log_path.exists() and not utils.wait_for_file(log_path, wait):
-        msg = "Run scripts/10_csi_capture.sh first"
-        print(msg, file=sys.stderr)
-        raise FileNotFoundError(msg)
+        print(_ERR_MSG, file=sys.stderr)
+        raise FileNotFoundError(_ERR_MSG)
     with open(log_path, "r") as f:
         for line in f:
             pkt = utils.parse_csi_line(line)
