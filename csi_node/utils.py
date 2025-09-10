@@ -81,17 +81,31 @@ def wait_for_file(path: Path | str, timeout: float = 5.0, interval: float = 0.5)
 def parse_csi_line(line: str) -> Optional[dict]:
     """Parse a single FeitCSI JSON line.
 
-    Expected format:
-    {"ts": 0.0, "rssi": [-40, -42], "csi": [[...],[...]]}
+    Expected format::
+
+        {"ts": 0.0, "rssi": [-40, -42], "csi": [[...], [...]]}
+
+    ``rssi`` is expected to contain two values (one per chain) and will be
+    returned as ``List[float]``. ``None`` is returned if parsing fails.
     """
     line = line.strip()
     if not line:
         return None
     try:
         pkt = json.loads(line)
-        pkt["csi"] = np.array(pkt.get("csi", []), dtype=float)
-        pkt["rssi"] = pkt.get("rssi")
-        pkt["ts"] = float(pkt.get("ts", 0.0))
-        return pkt
     except json.JSONDecodeError:
         return None
+
+    try:
+        pkt["csi"] = np.array(pkt.get("csi", []), dtype=float)
+
+        raw_rssi = pkt.get("rssi")
+        if not isinstance(raw_rssi, (list, tuple)) or len(raw_rssi) != 2:
+            return None
+        pkt["rssi"] = [float(v) for v in raw_rssi]
+
+        pkt["ts"] = float(pkt.get("ts", 0.0))
+    except (TypeError, ValueError):
+        return None
+
+    return pkt
