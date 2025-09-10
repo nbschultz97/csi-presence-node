@@ -5,6 +5,7 @@ import os
 import fcntl
 import tempfile
 import time
+import logging
 from pathlib import Path
 import numpy as np
 from typing import List, Optional
@@ -40,18 +41,23 @@ def safe_csv_append(path: str, row: List) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     line = ",".join(map(str, row)) + "\n"
     tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path))
-    with os.fdopen(tmp_fd, "w") as tmp:
-        tmp.write(line)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-    with open(path, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        with open(tmp_path) as tmp:
-            f.write(tmp.read())
-        f.flush()
-        os.fsync(f.fileno())
-        fcntl.flock(f, fcntl.LOCK_UN)
-    os.remove(tmp_path)
+    try:
+        with os.fdopen(tmp_fd, "w") as tmp:
+            tmp.write(line)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        with open(path, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            with open(tmp_path) as tmp:
+                f.write(tmp.read())
+            f.flush()
+            os.fsync(f.fileno())
+            fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            logging.warning("Failed to remove temporary file %s", tmp_path)
 
 
 def rotate_file(path: str, max_bytes: int) -> None:
