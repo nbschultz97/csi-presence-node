@@ -16,7 +16,30 @@ sys.exit(0 if marker.exists() else 1)
 PY
   echo "Detected PEP 668 EXTERNALLY-MANAGED; using --user install" >&2
 fi
-${PYTHON} -m pip install "${PIP_FLAGS[@]}" numpy scipy pandas scikit-learn watchdog pyyaml >/dev/null
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REQ_FILE="${SCRIPT_DIR}/../requirements.txt"
+
+WHEEL_DIR_ENV=${WHEEL_DIR:-}
+WHEEL_DIR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --wheel-dir)
+      WHEEL_DIR="$2"
+      shift 2
+      ;;
+    *)
+      echo "Usage: $0 [--wheel-dir DIR]" >&2
+      exit 1
+      ;;
+  esac
+done
+WHEEL_DIR=${WHEEL_DIR:-$WHEEL_DIR_ENV}
+if [[ -n "${WHEEL_DIR}" ]]; then
+  PIP_FLAGS+=(--no-index --find-links "$WHEEL_DIR")
+fi
+
+${PYTHON} -m pip install "${PIP_FLAGS[@]}" -r "$REQ_FILE" >/dev/null
 
 echo "Kernel: $(uname -r)"
 if lsmod | grep -q iwlwifi; then
