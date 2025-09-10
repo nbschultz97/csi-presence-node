@@ -2,6 +2,7 @@
 import time
 import yaml
 import sys
+import os
 from pathlib import Path
 from collections import deque
 import numpy as np
@@ -20,10 +21,29 @@ class CSILogHandler(FileSystemEventHandler):
         self.process_cb = process_cb
         self._fp = open(self.path, "r")
         self._fp.seek(0, 2)
+        self._inode = os.fstat(self._fp.fileno()).st_ino
 
     def on_modified(self, event):
         if event.src_path != self.path:
             return
+
+        try:
+            inode = os.stat(self.path).st_ino
+        except FileNotFoundError:
+            inode = None
+
+        if inode != self._inode:
+            try:
+                self._fp.close()
+            except Exception:
+                pass
+            try:
+                self._fp = open(self.path, "r")
+                self._fp.seek(0, 2)
+                self._inode = os.stat(self.path).st_ino
+            except FileNotFoundError:
+                return
+
         while True:
             line = self._fp.readline()
             if not line:
