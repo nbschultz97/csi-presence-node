@@ -1,93 +1,83 @@
 # csi-presence-node
 
-Minimal CSI presence logger for Intel AX210 using FeitCSI.
+Vantage Scanner demo node. Streams WiFi CSI from an Intel AX210 via
+[FeitCSI](https://github.com/KuskoSoft/FeitCSI) and outputs presence, direction
+and a coarse pose estimate (standing / crouching / prone).
 
-## Setup
+## Hardware
 
-1. Install dependencies and verify driver. The script drops `--user` when a
-   virtual environment is active (`$VIRTUAL_ENV`); otherwise it installs with
-   `pip --user`, which also respects PEP 668 `EXTERNALLY-MANAGED` markers:
-   ```bash
-   scripts/00_install_deps.sh
-   ```
-2. Ensure the FeitCSI binary is installed. If it's not on your `PATH`, export `FEITCSI_BIN` to its absolute path:
-   ```bash
-   export FEITCSI_BIN=/path/to/feitcsi
-   ```
-3. Start CSI capture (channel 36 / 80 MHz / BCC coding by default):
-   ```bash
-   scripts/10_csi_capture.sh 36 80 LDPC
-   ```
-   The third argument or `FEITCSI_CODING` env var selects the coding scheme
-   (`LDPC` or `BCC`), which the script forwards to FeitCSI via `--coding`.
-   On launch the script checks `[ -x "$FEITCSI_BIN" ]` or
-   `command -v "$FEITCSI_BIN"` to ensure the binary is available. If
-   missing, it prints `FeitCSI binary not found; set
-   FEITCSI_BIN=/path/to/feitcsi` and exits non-zero.
-4. In an empty room, record baseline:
-   ```bash
-   python -m csi_node.baseline --duration 60
-   ```
-5. Run the realtime pipeline (add `--pose` or `--tui` for extras):
-   ```bash
-   python -m csi_node.pipeline [--pose] [--tui]
-   ```
-   The pipeline aborts with `CSI capture not running or log idle. Start scripts/10_csi_capture.sh and retry.`
-   if the log file is missing or stale.
+* Intel AX210 NIC with two antennas
+* Kali/Linux or similar with kernel iwlwifi driver
+* Optional: display for curses TUI
 
-Output is written to `data/presence_log.csv` with presence, direction and pose columns.
+## Quick start
 
-## Quick Demo (Pose + TUI)
+The `setup.sh` script installs dependencies, builds FeitCSI and creates a Python
+virtual environment:
 
-Run the live pipeline with pose classification and the curses dashboard:
+```bash
+./setup.sh
+source .venv/bin/activate
+```
+
+Verify the install with the bundled demo which captures for ten seconds and
+prints JSON results:
 
 ```bash
 ./scripts/demo.sh --with-pose
 ```
 
-If live capture fails or you want to use a recorded log:
+## Running
+
+Start live capture using the Python interface (replace `wlan0` with your AX210
+interface):
 
 ```bash
-./scripts/demo.sh --with-pose --replay data/sample_csi.b64
+python run.py --iface wlan0 --tui --pose
 ```
 
-The demo prints presence, direction, pose and confidence to the terminal and
-logs results to `data/presence_log.csv`.
+For offline playback of a saved log:
 
-## Configuration
+```bash
+python run.py --replay data/sample_csi.b64 --tui --pose
+```
 
-Edit `csi_node/config.yaml` for thresholds, windows, and file paths. Baseline and output files rotate when exceeding 1 MB.
-If the capture reports only a single RSSI chain, the pipeline records `NaN`
-for `rssi0`/`rssi1` and defaults the direction label to `C`.
+Each window emits a JSON object like:
+
+```json
+{"timestamp": "2024-01-01T00:00:00", "presence": true,
+ "pose": "standing", "direction": "left", "distance_m": 1.6,
+ "confidence": 0.78}
+```
+
+Logs are written to `data/presence_log.jsonl` and rotate when exceeding 1 MB.
+
+Baseline amplitudes for an empty room improve stability:
+
+```bash
+python -m csi_node.baseline --duration 60
+```
+
+## Demo mode
+
+`demo.sh` runs a quick self‑test: it checks the FeitCSI binary, captures CSI for
+10 s and tails the JSON log. Use `--replay <file>` to run the pipeline on a
+recorded capture instead.
 
 ## Tests
 
-Offline test using a bundled sample log:
+An offline regression test is included:
+
 ```bash
 python tests/test_offline.py
 ```
 
-## Acceptance tests
+## Configuration
 
-* Empty room for 60 s ⇒ `presence` stays `0`.
-* Walk in front for 30 s ⇒ `presence` flips to `1` for most windows.
-* Stand left/right/center of antenna ⇒ `direction` mostly `L`/`R`/`C` respectively.
-* CPU < 20% on one core at 10 Hz windows, memory stable.
+Edit `csi_node/config.yaml` for thresholds and file paths. Results include
+presence flag, left/center/right direction, coarse pose label and a crude
+RSSI‑based distance estimate.
 
-## Troubleshooting
+## License
 
-If the baseline recorder or pipeline reports
-`CSI capture not running or log idle. Start scripts/10_csi_capture.sh and retry.`,
-start CSI capture with `scripts/10_csi_capture.sh` so the log file exists and is
-fresh before retrying.
-
-## Training a better pose model
-
-Collect training data as `data/pose_train.npz` with arrays `X` and `y` then
-run:
-
-```bash
-python -m csi_node.pose_classifier --train --in data/pose_train.npz --out models/wipose.joblib
-```
-
-Place the resulting model under `models/` and rerun the demo to use it.
+MIT

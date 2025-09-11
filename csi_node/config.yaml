@@ -7,5 +7,5 @@ pca_threshold: 1.0
 rssi_delta: 2.0       # dB
 baseline_file: ./data/baseline.npz
 log_file: ./data/csi_raw.log
-output_file: ./data/presence_log.csv
+output_file: ./data/presence_log.jsonl
 rotation_max_bytes: 1048576

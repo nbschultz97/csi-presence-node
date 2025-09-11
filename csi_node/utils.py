@@ -8,7 +8,7 @@ import time
 import logging
 from pathlib import Path
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Dict
 from scipy.signal import savgol_filter as _savgol_filter
 
 
@@ -40,6 +40,30 @@ def compute_pca(matrix: np.ndarray) -> np.ndarray:
 def safe_csv_append(path: str, row: List) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     line = ",".join(map(str, row)) + "\n"
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path))
+    try:
+        with os.fdopen(tmp_fd, "w") as tmp:
+            tmp.write(line)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        with open(path, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            with open(tmp_path) as tmp:
+                f.write(tmp.read())
+            f.flush()
+            os.fsync(f.fileno())
+            fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            logging.warning("Failed to remove temporary file %s", tmp_path)
+
+
+def safe_json_append(path: str, obj: Dict) -> None:
+    """Atomically append JSON object ``obj`` as one line to ``path``."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    line = json.dumps(obj) + "\n"
     tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path))
     try:
         with os.fdopen(tmp_fd, "w") as tmp:
@@ -115,3 +139,15 @@ def parse_csi_line(line: str) -> Optional[dict]:
         return None
 
     return pkt
+
+
+def rssi_to_distance(rssi: float, tx_power: float = -40.0, n: float = 2.0) -> float:
+    """Estimate distance in meters from RSSI using a log-distance path loss model.
+
+    ``tx_power`` is the expected RSSI (dBm) at 1 m and ``n`` the path loss
+    exponent. This is a crude estimate suitable only for coarse demo output.
+    """
+    try:
+        return float(10 ** ((tx_power - rssi) / (10 * n)))
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return float("nan")

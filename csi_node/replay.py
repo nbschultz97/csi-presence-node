@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterator
 
 from . import utils
+from . import feitcsi
 
 
 def decode_b64_capture(src: Path) -> Path:
@@ -27,6 +28,9 @@ def replay(path: str, speed: float = 1.0) -> Iterator[dict]:
     if p.suffix == ".b64":
         tmp = decode_b64_capture(p)
         p = tmp
+    if p.suffix == ".ftm":
+        yield from feitcsi.ftm_stream(str(p))
+        return
 
     def _iter() -> Iterator[dict]:
         with open(p, "r") as f:

@@ -4,6 +4,7 @@ import time
 import yaml
 import sys
 import os
+import json
 from pathlib import Path
 from collections import deque
 import numpy as np
@@ -148,6 +149,8 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
             direction = "L"
         elif diff < -delta:
             direction = "R"
+    avg_rssi = (rssi0 + rssi1) / 2.0
+    distance = utils.rssi_to_distance(avg_rssi)
     presence = int(var > cfg["variance_threshold"] or pca1 > cfg["pca_threshold"])
     return {
         "presence": presence,
@@ -156,6 +159,7 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
         "pca1": pca1,
         "rssi0": rssi0,
         "rssi1": rssi1,
+        "distance": distance,
         "pose_feat": np.array([mean_mag, std_mag]),
         "ts": end_ts,
     }
@@ -165,8 +169,9 @@ def run_demo(
     pose: bool = False,
     tui: bool = False,
     replay_path: str | None = None,
+    source=None,
     window: float = 3.0,
-    out: str = "data/presence_log.csv",
+    out: str = "data/presence_log.jsonl",
     speed: float = 1.0,
 ) -> None:
     """Run realtime or replay pipeline with optional pose and TUI."""
@@ -243,21 +248,17 @@ def run_demo(
             pose_conf=pose_conf,
         )
         iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(result["ts"]))
-        row = [
-            iso,
-            int(result["ts"] * 1000),
-            result["presence"],
-            last_dir,
-            f"{result['var']:.3f}",
-            f"{result['pca1']:.3f}",
-            f"{result['rssi0']:.1f}",
-            f"{result['rssi1']:.1f}",
-            pose_label,
-            f"{pose_conf:.2f}",
-            int(cfg["window_size"] * 1000),
-        ]
+        entry = {
+            "timestamp": iso,
+            "presence": bool(result["presence"]),
+            "pose": pose_label.lower(),
+            "direction": {"L": "left", "R": "right", "C": "center"}[last_dir],
+            "distance_m": float(result["distance"]),
+            "confidence": presence_ema,
+        }
+        print(json.dumps(entry))
         utils.rotate_file(cfg["output_file"], cfg["rotation_max_bytes"])
-        utils.safe_csv_append(cfg["output_file"], row)
+        utils.safe_json_append(cfg["output_file"], entry)
 
     def process() -> None:
         now = buffer[-1]["ts"]
@@ -268,7 +269,13 @@ def run_demo(
         if result:
             handle(result)
 
-    if replay_path:
+    if source is not None:
+        for pkt in source:
+            if stop.is_set():
+                break
+            buffer.append(pkt)
+            process()
+    elif replay_path:
         for pkt in replay_mod.replay(replay_path, speed):
             if stop.is_set():
                 break
@@ -317,19 +324,16 @@ def run(config_path: str = "csi_node/config.yaml") -> None:
         result = compute_window(buffer, start, now, baseline, cfg)
         if result:
             iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(result["ts"]))
-            row = [
-                iso,
-                int(result["ts"] * 1000),
-                result["presence"],
-                result["direction"],
-                f"{result['var']:.3f}",
-                f"{result['pca1']:.3f}",
-                f"{result['rssi0']:.1f}",
-                f"{result['rssi1']:.1f}",
-                int(cfg["window_size"] * 1000),
-            ]
+            entry = {
+                "timestamp": iso,
+                "presence": bool(result["presence"]),
+                "pose": "n/a",
+                "direction": {"L": "left", "R": "right", "C": "center"}[result["direction"]],
+                "distance_m": float(result["distance"]),
+                "confidence": float(result["presence"]),
+            }
             utils.rotate_file(cfg["output_file"], cfg["rotation_max_bytes"])
-            utils.safe_csv_append(cfg["output_file"], row)
+            utils.safe_json_append(cfg["output_file"], entry)
 
     observer = Observer()
     log_path = Path(cfg["log_file"])
@@ -384,15 +388,25 @@ def main() -> None:
     parser.add_argument("--pose", action="store_true", help="enable pose classifier")
     parser.add_argument("--tui", action="store_true", help="launch curses UI")
     parser.add_argument("--replay", type=str, default=None, help="replay log file")
+    parser.add_argument("--iface", type=str, default=None, help="live capture interface")
     parser.add_argument("--window", type=float, default=3.0, help="window size (s)")
-    parser.add_argument("--out", type=str, default="data/presence_log.csv", help="output CSV")
+    parser.add_argument("--out", type=str, default="data/presence_log.jsonl", help="output JSONL")
     parser.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
     args = parser.parse_args()
+
+    src = None
+    if args.iface:
+        try:
+            from . import feitcsi
+            src = feitcsi.live_stream(args.iface)
+        except Exception as exc:  # pragma: no cover - hardware optional
+            print(f"FeitCSI live stream unavailable: {exc}", file=sys.stderr)
 
     run_demo(
         pose=args.pose,
         tui=args.tui,
         replay_path=args.replay,
+        source=src,
         window=args.window,
         out=args.out,
         speed=args.speed,

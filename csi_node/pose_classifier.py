@@ -8,15 +8,15 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 import joblib
 
-LABELS = ["STANDING", "CROUCHING"]
+LABELS = ["STANDING", "CROUCHING", "PRONE"]
 
 
 class PoseClassifier:
-    """Two-class pose classifier returning label and confidence.
+    """Tiny pose classifier returning label and confidence for three poses.
 
     If ``model_path`` exists, the model is loaded via ``joblib``. Otherwise a
-    tiny deterministic logistic regression model is instantiated so the demo
-    remains functional even without training data.
+    deterministic logistic regression model with three synthetic classes is
+    instantiated so the demo remains functional even without training data.
     """
 
     def __init__(self, model_path: str | None = None):
@@ -31,11 +31,17 @@ class PoseClassifier:
 
     @staticmethod
     def _toy_model() -> LogisticRegression:
-        """Return a deterministic logistic regression model."""
-        clf = LogisticRegression()
-        # Deterministic dataset: two points, two classes.
-        X = np.array([[0.0, 0.0], [1.0, 1.0]])
-        y = np.array([0, 1])
+        """Return a deterministic logistic regression model with 3 classes."""
+        clf = LogisticRegression(multi_class="ovr")
+        # Deterministic dataset: three points mapping to three poses.
+        X = np.array(
+            [
+                [0.0, 0.0],  # standing
+                [1.0, 1.0],  # crouching
+                [2.0, 2.0],  # prone
+            ]
+        )
+        y = np.array([0, 1, 2])
         clf.fit(X, y)
         return clf
 
@@ -57,9 +63,9 @@ def _train(in_path: str | None, out_path: str) -> None:
         X, y = data["X"], data["y"]
     else:
         rng = np.random.default_rng(0)
-        X = rng.normal(size=(32, 2))
-        y = rng.integers(0, 2, size=32)
-    clf = LogisticRegression(max_iter=1000)
+        X = rng.normal(size=(48, 2))
+        y = rng.integers(0, 3, size=48)
+    clf = LogisticRegression(max_iter=1000, multi_class="ovr")
     clf.fit(X, y)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(clf, out_path)
