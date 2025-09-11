@@ -43,7 +43,7 @@ class PoseEstimator:
         try:
             import torch
 
-            arr = np.asarray(amps, dtype="float32")
+            arr = np.asarray(amps, dtype="float32").flatten()
             tensor = torch.from_numpy(arr).unsqueeze(0)
             with torch.no_grad():
                 pose, conf = self.model.predict(tensor)
