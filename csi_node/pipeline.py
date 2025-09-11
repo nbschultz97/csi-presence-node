@@ -1,4 +1,5 @@
-"""Realtime CSI presence pipeline."""
+"""Realtime CSI presence pipeline with optional pose and TUI."""
+import argparse
 import time
 import yaml
 import sys
@@ -8,7 +9,12 @@ from collections import deque
 import numpy as np
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from threading import Event, Thread
+
 from . import utils
+from .pose_classifier import PoseClassifier
+from . import tui as tui_mod
+from . import replay as replay_mod
 
 CAPTURE_EXIT_CODE = 2
 STALE_THRESHOLD = 5.0
@@ -125,6 +131,9 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
     amps = amps.reshape(amps.shape[0], -1)
     var = float(np.var(amps))
     pca1 = float(utils.compute_pca(amps)[0])
+    abs_amps = np.abs(amps)
+    mean_mag = float(np.mean(abs_amps))
+    std_mag = float(np.std(abs_amps))
     rssi0 = rssi1 = float("nan")
     direction = "C"
     rssis = [p.get("rssi") for p in valid if p.get("rssi")]
@@ -147,8 +156,145 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
         "pca1": pca1,
         "rssi0": rssi0,
         "rssi1": rssi1,
+        "pose_feat": np.array([mean_mag, std_mag]),
         "ts": end_ts,
     }
+
+
+def run_demo(
+    pose: bool = False,
+    tui: bool = False,
+    replay_path: str | None = None,
+    window: float = 3.0,
+    out: str = "data/presence_log.csv",
+    speed: float = 1.0,
+) -> None:
+    """Run realtime or replay pipeline with optional pose and TUI."""
+    cfg = yaml.safe_load(open("csi_node/config.yaml"))
+    cfg["window_size"] = window
+    cfg["output_file"] = out
+    buffer = deque()
+    baseline = None
+    if Path(cfg["baseline_file"]).exists():
+        baseline = np.load(cfg["baseline_file"])["mean"]
+
+    classifier: PoseClassifier | None = None
+    if pose:
+        try:
+            classifier = PoseClassifier("models/wipose.joblib")
+        except Exception as exc:  # pragma: no cover - classifier optional
+            print(f"Pose classifier init failed: {exc}", file=sys.stderr)
+
+    alpha = 0.2
+    presence_ema = 0.0
+    pose_ema = 0.0
+    last_dir = "C"
+    l_cnt = r_cnt = 0
+
+    state = {
+        "presence": "NO",
+        "presence_conf": 0.0,
+        "direction": "C",
+        "rssi_delta": 0.0,
+        "pose": "N/A",
+        "pose_conf": 0.0,
+    }
+    stop = Event()
+    tui_thread = None
+    if tui:
+        mode = "LIVE (FeitCSI)" if replay_path is None else "REPLAY"
+        tui_thread = Thread(
+            target=tui_mod.run,
+            args=(state, stop, out, mode, replay_path),
+            daemon=True,
+        )
+        tui_thread.start()
+
+    def handle(result: dict) -> None:
+        nonlocal presence_ema, pose_ema, last_dir, l_cnt, r_cnt
+        raw = 1.0 if result["presence"] else 0.0
+        presence_ema = alpha * raw + (1 - alpha) * presence_ema
+        diff = result["rssi0"] - result["rssi1"]
+        delta = cfg["rssi_delta"]
+        if diff > delta:
+            l_cnt += 1
+            r_cnt = 0
+        elif diff < -delta:
+            r_cnt += 1
+            l_cnt = 0
+        else:
+            l_cnt = r_cnt = 0
+        if l_cnt >= 3:
+            last_dir = "L"
+        elif r_cnt >= 3:
+            last_dir = "R"
+        pose_label = "N/A"
+        pose_conf = 0.0
+        if classifier is not None:
+            pose_label, conf = classifier.predict(result["pose_feat"])
+            pose_ema = alpha * conf + (1 - alpha) * pose_ema
+            pose_conf = pose_ema
+        state.update(
+            presence="YES" if result["presence"] else "NO",
+            presence_conf=presence_ema,
+            direction=last_dir,
+            rssi_delta=diff,
+            pose=pose_label,
+            pose_conf=pose_conf,
+        )
+        iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(result["ts"]))
+        row = [
+            iso,
+            int(result["ts"] * 1000),
+            result["presence"],
+            last_dir,
+            f"{result['var']:.3f}",
+            f"{result['pca1']:.3f}",
+            f"{result['rssi0']:.1f}",
+            f"{result['rssi1']:.1f}",
+            pose_label,
+            f"{pose_conf:.2f}",
+            int(cfg["window_size"] * 1000),
+        ]
+        utils.rotate_file(cfg["output_file"], cfg["rotation_max_bytes"])
+        utils.safe_csv_append(cfg["output_file"], row)
+
+    def process() -> None:
+        now = buffer[-1]["ts"]
+        while buffer and now - buffer[0]["ts"] > cfg["window_size"]:
+            buffer.popleft()
+        start = now - cfg["window_size"]
+        result = compute_window(buffer, start, now, baseline, cfg)
+        if result:
+            handle(result)
+
+    if replay_path:
+        for pkt in replay_mod.replay(replay_path, speed):
+            if stop.is_set():
+                break
+            buffer.append(pkt)
+            process()
+    else:
+        observer = Observer()
+        log_path = Path(cfg["log_file"])
+        wait = cfg.get("log_wait", 5.0)
+        if not log_path.exists() and not utils.wait_for_file(log_path, wait):
+            _capture_fail()
+        _check_log_fresh(log_path)
+        handler = CSILogHandler(log_path, buffer, process)
+        observer.schedule(handler, str(log_path.parent), recursive=False)
+        observer.start()
+        try:
+            while not stop.is_set():
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            pass
+        observer.stop()
+        observer.join()
+
+    stop.set()
+    if tui_thread:
+        tui_thread.join()
 
 
 def run(config_path: str = "csi_node/config.yaml") -> None:
@@ -233,5 +379,25 @@ def run_offline(log_path: str, cfg: dict):
     return df
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CSI presence pipeline")
+    parser.add_argument("--pose", action="store_true", help="enable pose classifier")
+    parser.add_argument("--tui", action="store_true", help="launch curses UI")
+    parser.add_argument("--replay", type=str, default=None, help="replay log file")
+    parser.add_argument("--window", type=float, default=3.0, help="window size (s)")
+    parser.add_argument("--out", type=str, default="data/presence_log.csv", help="output CSV")
+    parser.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
+    args = parser.parse_args()
+
+    run_demo(
+        pose=args.pose,
+        tui=args.tui,
+        replay_path=args.replay,
+        window=args.window,
+        out=args.out,
+        speed=args.speed,
+    )
+
+
 if __name__ == "__main__":
-    run()
+    main()
