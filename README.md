@@ -37,6 +37,23 @@ Minimal CSI presence logger for Intel AX210 using FeitCSI.
 
 Output is written to `./data/presence_log.csv`.
 
+## Quick Demo (Pose + TUI)
+
+Run the live pipeline with pose classification and the curses dashboard:
+
+```bash
+./scripts/demo.sh --with-pose
+```
+
+If live capture fails or you want to use a recorded log:
+
+```bash
+./scripts/demo.sh --with-pose --replay data/sample_csi.dat
+```
+
+The demo prints presence, direction, pose and confidence to the terminal and
+logs results to `data/presence_log.csv`.
+
 ## Configuration
 
 Edit `csi_node/config.yaml` for thresholds, windows, and file paths. Baseline and output files rotate when exceeding 1 MB.
@@ -62,3 +79,14 @@ python tests/test_offline.py
 If the baseline recorder or pipeline prints `Run scripts/10_csi_capture.sh first`,
 start CSI capture with `scripts/10_csi_capture.sh` so the log file exists before
 retrying.
+
+## Training a better pose model
+
+Collect training data as `data/pose_train.npz` with arrays `X` and `y` then
+run:
+
+```bash
+python -m csi_node.pose_classifier --train --in data/pose_train.npz --out models/wipose.joblib
+```
+
+Place the resulting model under `models/` and rerun the demo to use it.
