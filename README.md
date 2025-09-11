@@ -48,7 +48,7 @@ Run the live pipeline with pose classification and the curses dashboard:
 If live capture fails or you want to use a recorded log:
 
 ```bash
-./scripts/demo.sh --with-pose --replay data/sample_csi.dat
+./scripts/demo.sh --with-pose --replay data/sample_csi.b64
 ```
 
 The demo prints presence, direction, pose and confidence to the terminal and

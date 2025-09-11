@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+# Example: ./scripts/demo.sh --with-pose --replay data/sample_csi.b64
+
 WITH_POSE=0
 REPLAY=""
 
