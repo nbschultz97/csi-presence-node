@@ -41,9 +41,12 @@ class PoseEstimator:
         if self.model is None:
             return "unknown", 0.0
         try:
-            tensor = np.asarray(amps, dtype="float32")
-            tensor = tensor.reshape(1, *tensor.shape)
-            pose, conf = self.model.predict(tensor)
+            import torch
+
+            arr = np.asarray(amps, dtype="float32")
+            tensor = torch.from_numpy(arr).unsqueeze(0)
+            with torch.no_grad():
+                pose, conf = self.model.predict(tensor)
             return str(pose), float(conf)
         except Exception:
             # Any failure should not crash the pipeline.
