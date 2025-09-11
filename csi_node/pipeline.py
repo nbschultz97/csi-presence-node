@@ -1,5 +1,11 @@
-"""Realtime CSI presence pipeline."""
+"""Realtime CSI presence pipeline.
+
+FeitCSI's command line tool streams CSI frames to a JSON lines log. This
+module tails that log, performs windowed feature extraction and emits
+standardised JSON results with presence, direction and pose estimates.
+"""
 import time
+import json
 import yaml
 import sys
 import os
@@ -9,6 +15,7 @@ import numpy as np
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from . import utils
+from .pose import PoseEstimator
 
 CAPTURE_EXIT_CODE = 2
 STALE_THRESHOLD = 5.0
@@ -79,7 +86,7 @@ class CSILogHandler(FileSystemEventHandler):
         self._size = self._fp.tell()
 
 
-def compute_window(buffer, start_ts, end_ts, baseline, cfg):
+def compute_window(buffer, start_ts, end_ts, baseline, cfg, pose_estimator=None):
     window = [p for p in buffer if start_ts <= p["ts"] <= end_ts]
     if not window:
         return None
@@ -125,6 +132,9 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
     amps = amps.reshape(amps.shape[0], -1)
     var = float(np.var(amps))
     pca1 = float(utils.compute_pca(amps)[0])
+    pose, conf = "unknown", 0.0
+    if pose_estimator is not None:
+        pose, conf = pose_estimator.predict(amps)
     rssi0 = rssi1 = float("nan")
     direction = "C"
     rssis = [p.get("rssi") for p in valid if p.get("rssi")]
@@ -143,6 +153,8 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
     return {
         "presence": presence,
         "direction": direction,
+        "pose": pose,
+        "confidence": conf,
         "var": var,
         "pca1": pca1,
         "rssi0": rssi0,
@@ -158,6 +170,7 @@ def run(config_path: str = "csi_node/config.yaml") -> None:
     if Path(cfg["baseline_file"]).exists():
         baseline = np.load(cfg["baseline_file"])["mean"]
     last_emit = 0.0
+    pose_estimator = PoseEstimator()
 
     def process():
         nonlocal last_emit
@@ -168,7 +181,7 @@ def run(config_path: str = "csi_node/config.yaml") -> None:
             return
         last_emit = now
         start = now - cfg["window_size"]
-        result = compute_window(buffer, start, now, baseline, cfg)
+        result = compute_window(buffer, start, now, baseline, cfg, pose_estimator)
         if result:
             iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(result["ts"]))
             row = [
@@ -184,6 +197,21 @@ def run(config_path: str = "csi_node/config.yaml") -> None:
             ]
             utils.rotate_file(cfg["output_file"], cfg["rotation_max_bytes"])
             utils.safe_csv_append(cfg["output_file"], row)
+
+            # Emit standardised JSON for realtime consumers.
+            out = {
+                "timestamp": iso,
+                "presence": bool(result["presence"]),
+                "pose": result["pose"],
+                "direction": result["direction"],
+                "confidence": float(result["confidence"]),
+            }
+            print(json.dumps(out))
+            log_dir = Path("logs")
+            log_dir.mkdir(exist_ok=True)
+            log_file = log_dir / f"session_{time.strftime('%Y%m%d')}.json"
+            with open(log_file, "a") as fp:
+                fp.write(json.dumps(out) + "\n")
 
     observer = Observer()
     log_path = Path(cfg["log_file"])
@@ -208,6 +236,7 @@ def run_offline(log_path: str, cfg: dict):
     if Path(cfg["baseline_file"]).exists():
         baseline = np.load(cfg["baseline_file"])["mean"]
     rows = []
+    pose_estimator = PoseEstimator()
     log_path = Path(log_path)
     wait = cfg.get("log_wait", 5.0)
     if not log_path.exists() and not utils.wait_for_file(log_path, wait):
@@ -225,7 +254,7 @@ def run_offline(log_path: str, cfg: dict):
             if len(buffer) < 1:
                 continue
             start = now - cfg["window_size"]
-            result = compute_window(buffer, start, now, baseline, cfg)
+            result = compute_window(buffer, start, now, baseline, cfg, pose_estimator)
             if result:
                 rows.append(result)
     import pandas as pd

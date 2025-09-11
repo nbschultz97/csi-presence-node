@@ -1,64 +1,55 @@
 # csi-presence-node
 
-Minimal CSI presence logger for Intel AX210 using FeitCSI.
+Minimal CSI presence and pose logger for Intel AX210 using [FeitCSI](https://github.com/KuskoSoft/FeitCSI).
 
-## Setup
+## Hardware
 
-1. Install dependencies and verify driver. The script drops `--user` when a
-   virtual environment is active (`$VIRTUAL_ENV`); otherwise it installs with
-   `pip --user`, which also respects PEP 668 `EXTERNALLY-MANAGED` markers:
-   ```bash
-   scripts/00_install_deps.sh
-   ```
-2. Ensure the FeitCSI binary is installed. If it's not on your `PATH`, export `FEITCSI_BIN` to its absolute path:
-   ```bash
-   export FEITCSI_BIN=/path/to/feitcsi
-   ```
-3. Start CSI capture (channel 36 / 80 MHz / BCC coding by default):
-   ```bash
-   scripts/10_csi_capture.sh 36 80 LDPC
-   ```
-   The third argument or `FEITCSI_CODING` env var selects the coding scheme
-   (`LDPC` or `BCC`), which the script forwards to FeitCSI via `--coding`.
-   On launch the script checks `[ -x "$FEITCSI_BIN" ]` or
-   `command -v "$FEITCSI_BIN"` to ensure the binary is available. If
-   missing, it prints `FeitCSI binary not found; set
-   FEITCSI_BIN=/path/to/feitcsi` and exits non-zero.
-4. In an empty room, record baseline:
-   ```bash
-   python -m csi_node.baseline --duration 60
-   ```
-5. Run the realtime pipeline:
-   ```bash
-   python -m csi_node.pipeline
-   ```
-   The pipeline aborts with `Run scripts/10_csi_capture.sh first` if the CSI
-   log file is missing.
+* Intel AX210 or other NIC capable of CSI extraction
+* System with monitor-mode permissions
 
-Output is written to `./data/presence_log.csv`.
+## Quick start
+
+Clone the repository and run the single setup script. It installs Python
+dependencies, verifies hardware, builds FeitCSI if missing and launches the
+realtime pipeline:
+
+```bash
+./setup_and_run.sh
+```
+
+Example output:
+
+```json
+{"timestamp": "2024-01-01T00:00:00", "presence": true, "pose": "standing", "direction": "L", "confidence": 0.73}
+```
+
+All frames are also appended to `logs/session_<date>.json` for later analysis.
+
+## FeitCSI install notes
+
+The setup script checks `pip show feitcsi`. If the package is absent it clones
+`https://github.com/KuskoSoft/FeitCSI`, builds the binary with `cargo build
+--release` and installs the Python bindings with `pip install .` from the
+`python` subdirectory.
 
 ## Configuration
 
-Edit `csi_node/config.yaml` for thresholds, windows, and file paths. Baseline and output files rotate when exceeding 1 MB.
-If the capture reports only a single RSSI chain, the pipeline records `NaN`
-for `rssi0`/`rssi1` and defaults the direction label to `C`.
+Edit `csi_node/config.yaml` to adjust thresholds, window sizes and paths.
+Baseline and CSV outputs rotate when exceeding 1 MB. When only a single RSSI
+chain is reported, direction defaults to `C`.
 
 ## Tests
 
-Offline test using a bundled sample log:
+Offline regression test using a bundled sample log:
+
 ```bash
 python tests/test_offline.py
 ```
 
-## Acceptance tests
-
-* Empty room for 60 s ⇒ `presence` stays `0`.
-* Walk in front for 30 s ⇒ `presence` flips to `1` for most windows.
-* Stand left/right/center of antenna ⇒ `direction` mostly `L`/`R`/`C` respectively.
-* CPU < 20% on one core at 10 Hz windows, memory stable.
-
 ## Troubleshooting
 
-If the baseline recorder or pipeline prints `Run scripts/10_csi_capture.sh first`,
-start CSI capture with `scripts/10_csi_capture.sh` so the log file exists before
-retrying.
+* Ensure the wireless interface supports monitor mode and appears in `iw dev`.
+* Run the script with sufficient permissions to switch channels.
+* If FeitCSI capture fails, re-check driver patches and firmware.
+* On `Run scripts/10_csi_capture.sh first`, ensure CSI capture is active and
+  writing to the configured log.
