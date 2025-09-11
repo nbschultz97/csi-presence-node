@@ -28,14 +28,14 @@ Minimal CSI presence logger for Intel AX210 using FeitCSI.
    ```bash
    python -m csi_node.baseline --duration 60
    ```
-5. Run the realtime pipeline:
+5. Run the realtime pipeline (add `--pose` or `--tui` for extras):
    ```bash
-   python -m csi_node.pipeline
+   python -m csi_node.pipeline [--pose] [--tui]
    ```
-   The pipeline aborts with `Run scripts/10_csi_capture.sh first` if the CSI
-   log file is missing.
+   The pipeline aborts with `CSI capture not running or log idle. Start scripts/10_csi_capture.sh and retry.`
+   if the log file is missing or stale.
 
-Output is written to `./data/presence_log.csv`.
+Output is written to `data/presence_log.csv` with presence, direction and pose columns.
 
 ## Quick Demo (Pose + TUI)
 
@@ -76,9 +76,10 @@ python tests/test_offline.py
 
 ## Troubleshooting
 
-If the baseline recorder or pipeline prints `Run scripts/10_csi_capture.sh first`,
-start CSI capture with `scripts/10_csi_capture.sh` so the log file exists before
-retrying.
+If the baseline recorder or pipeline reports
+`CSI capture not running or log idle. Start scripts/10_csi_capture.sh and retry.`,
+start CSI capture with `scripts/10_csi_capture.sh` so the log file exists and is
+fresh before retrying.
 
 ## Training a better pose model
 
