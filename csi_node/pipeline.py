@@ -1,4 +1,4 @@
-"""Realtime CSI presence pipeline with optional pose and TUI."""
+"""Realtime CSI presence pipeline with optional pose classifier and curses TUI."""
 import argparse
 import time
 import yaml
@@ -12,8 +12,8 @@ from watchdog.events import FileSystemEventHandler
 from threading import Event, Thread
 
 from . import utils
-from .pose_classifier import PoseClassifier
-from . import tui as tui_mod
+from .pose_classifier import PoseClassifier  # pose classifier for skeletal state
+from . import tui as tui_mod  # curses dashboard hooks
 from . import replay as replay_mod
 
 CAPTURE_EXIT_CODE = 2
@@ -178,10 +178,10 @@ def run_demo(
     if Path(cfg["baseline_file"]).exists():
         baseline = np.load(cfg["baseline_file"])["mean"]
 
-    classifier: PoseClassifier | None = None
+    pose_clf: PoseClassifier | None = None
     if pose:
         try:
-            classifier = PoseClassifier("models/wipose.joblib")
+            pose_clf = PoseClassifier("models/wipose.joblib")
         except Exception as exc:  # pragma: no cover - classifier optional
             print(f"Pose classifier init failed: {exc}", file=sys.stderr)
 
@@ -230,8 +230,8 @@ def run_demo(
             last_dir = "R"
         pose_label = "N/A"
         pose_conf = 0.0
-        if classifier is not None:
-            pose_label, conf = classifier.predict(result["pose_feat"])
+        if pose_clf is not None:
+            pose_label, conf = pose_clf.predict(result["pose_feat"])
             pose_ema = alpha * conf + (1 - alpha) * pose_ema
             pose_conf = pose_ema
         state.update(
