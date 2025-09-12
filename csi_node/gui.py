@@ -115,6 +115,8 @@ class App:
         self._workflow_thread: threading.Thread | None = None
         self._prev_active_cons: list[tuple[str, str]] = []
         self._wifi_devs: list[str] = []
+        # When true, prefer sudo -n (passwordless) over pkexec for privileged commands
+        self._prefer_pwless_sudo: bool = False
 
         self._build_ui()
         self._schedule_pump()
@@ -301,42 +303,140 @@ class App:
         if mode == "live":
             self._append("AUTO", "Running preflight: wifi off, rfkill unblock, driver, regdomain, caps…")
             self._preflight()
-            ok = self._start_capture_with_fallback()
-            if not ok:
-                self._append("FEIT", "All capture attempts failed. See logs above.")
+
+            # Prefer direct FeitCSI Python interface (no file tail). If the
+            # pipeline exits immediately (module missing or permission issue),
+            # fall back to file-based capture.
+            dev = self.wifi_device.get().strip()
+            if not dev:
+                # Try to populate and pick first available
+                self._populate_wifi_devices()
+                dev = self.wifi_device.get().strip()
+            if not dev:
+                self._append("PIPE", "No Wi‑Fi device selected/detected; cannot start live pipeline.")
                 self.stop()
                 return
 
-            # Wait until log file exists and is non-empty
-            if not self._wait_for_file(REPO_ROOT / "data" / "csi_raw.log", 10.0):
-                self._append("FEIT", "Log not created after capture start; aborting.")
-                self.stop()
-                return
+            # Build candidate Python interpreters (venv, then system)
+            py_venv = sys.executable
+            py_sys = shutil.which("python3") or py_venv
 
-            pipe_cmd = [sys.executable, str(REPO_ROOT / "run.py"), "--out", out]
-            if pose_flag:
-                pipe_cmd.append(pose_flag)
+            def _start_iface(py_exec: str, privileged: bool) -> subprocess.Popen:
+                cmd = [py_exec, str(REPO_ROOT / "run.py"), "--iface", dev, "--out", out]
+                if pose_flag:
+                    cmd.append(pose_flag)
+                tag_cmd = " ".join(cmd)
+                if privileged:
+                    if shutil.which("pkexec"):
+                        full = ["pkexec"] + cmd
+                    else:
+                        full = ["sudo", "-n"] + cmd
+                    self._append("PIPE", f"Starting pipeline (iface, root): {tag_cmd}")
+                else:
+                    full = cmd
+                    self._append("PIPE", f"Starting pipeline (iface): {tag_cmd}")
+                return subprocess.Popen(
+                    full,
+                    cwd=str(REPO_ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+
+            def _stability_wait(proc: subprocess.Popen, secs: float = 2.0) -> bool:
+                time.sleep(secs)
+                return proc.poll() is None
+
+            # 1) Try venv Python with root (most likely to have deps + permissions)
+            try:
+                pipe_proc = _start_iface(py_venv, privileged=True)
+                self.pipe_plog = ProcessLogger("PIPE", pipe_proc, self.out_q)
+                self.pipe_plog.start()
+                if _stability_wait(pipe_proc):
+                    # Running fine
+                    pass
+                else:
+                    rc = pipe_proc.returncode
+                    self._append("PIPE", f"Pipeline (iface, venv, root) exited early (rc={rc})")
+                    # Capture stderr to detect missing module quickly
+                    try:
+                        _, err = pipe_proc.communicate(timeout=0.5)
+                    except Exception:
+                        err = ""
+                    try:
+                        self.pipe_plog.stop()
+                    except Exception:
+                        pass
+                    self.pipe_plog = None
+
+                    need_sys = ("No module named 'feitcsi'" in err) or ("CSIExtractor not available" in err)
+                    if need_sys and py_sys != py_venv:
+                        # 2) Try system python with root
+                        self._append("PIPE", "Retrying with system Python (root)…")
+                        pipe_proc = _start_iface(py_sys, privileged=True)
+                        self.pipe_plog = ProcessLogger("PIPE", pipe_proc, self.out_q)
+                        self.pipe_plog.start()
+                        if not _stability_wait(pipe_proc):
+                            rc = pipe_proc.returncode
+                            self._append("PIPE", f"Pipeline (iface, system, root) exited early (rc={rc}); falling back to file capture…")
+                            try:
+                                self.pipe_plog.stop()
+                            except Exception:
+                                pass
+                            self.pipe_plog = None
+                            raise RuntimeError("iface_root_failed")
+                    elif not need_sys:
+                        self._append("PIPE", "Pipeline failed for another reason; falling back to file capture…")
+                        raise RuntimeError("iface_root_failed")
+                    # else: system Python started and is running
+            except Exception:
+                # Fallback to file capture path
+                ok = self._start_capture_with_fallback()
+                if not ok:
+                    self._append("FEIT", "All capture attempts failed. See logs above.")
+                    self.stop()
+                    return
+                # Wait until log file exists and is non-empty
+                if not self._wait_for_file(REPO_ROOT / "data" / "csi_raw.log", 10.0):
+                    self._append("FEIT", "Log not created after capture start; aborting.")
+                    self.stop()
+                    return
+                # Rebuild pipeline command to tail file (unprivileged is fine here)
+                pipe_cmd = [py_venv, str(REPO_ROOT / "run.py"), "--out", out]
+                if pose_flag:
+                    pipe_cmd.append(pose_flag)
+                self._append("PIPE", f"Starting pipeline (file): {' '.join(pipe_cmd)}")
+                pipe_proc = subprocess.Popen(
+                    pipe_cmd,
+                    cwd=str(REPO_ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+                self.pipe_plog = ProcessLogger("PIPE", pipe_proc, self.out_q)
+                self.pipe_plog.start()
         else:
             rep = self.replay_path.get()
             speed = str(self.speed.get())
             pipe_cmd = [sys.executable, str(REPO_ROOT / "run.py"), "--replay", rep, "--speed", speed, "--out", out]
             if pose_flag:
                 pipe_cmd.append(pose_flag)
-
-        self._append("PIPE", f"Starting pipeline: {' '.join(pipe_cmd)}")
-        try:
-            pipe_proc = subprocess.Popen(
-                pipe_cmd,
-                cwd=str(REPO_ROOT),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-            self.pipe_plog = ProcessLogger("PIPE", pipe_proc, self.out_q)
-            self.pipe_plog.start()
-        except Exception as exc:
-            self._append("PIPE", f"Failed to start pipeline: {exc}")
+            self._append("PIPE", f"Starting pipeline: {' '.join(pipe_cmd)}")
+            try:
+                pipe_proc = subprocess.Popen(
+                    pipe_cmd,
+                    cwd=str(REPO_ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+                self.pipe_plog = ProcessLogger("PIPE", pipe_proc, self.out_q)
+                self.pipe_plog.start()
+            except Exception as exc:
+                self._append("PIPE", f"Failed to start pipeline: {exc}")
 
     def stop(self) -> None:
         if self.pipe_plog:
@@ -446,9 +546,12 @@ class App:
     def _run_cmd(self, cmd: list[str], tag: str, privileged: bool = False, timeout: float | None = None) -> int:
         full_cmd = cmd
         if privileged:
-            if shutil.which("pkexec"):
+            # Prefer sudo -n if passwordless is configured; otherwise pkexec
+            if self._prefer_pwless_sudo and shutil.which("sudo"):
+                full_cmd = ["sudo", "-n"] + cmd
+            elif shutil.which("pkexec"):
                 full_cmd = ["pkexec"] + cmd
-            else:
+            elif shutil.which("sudo"):
                 full_cmd = ["sudo", "-n"] + cmd
         self._append(tag, f"$ {' '.join(full_cmd)}")
         try:
@@ -556,7 +659,12 @@ class App:
         """
         script = REPO_ROOT / "scripts" / "preflight_root.sh"
         if script.exists():
-            cmd = ["sudo", "-n", "bash", str(script)] if shutil.which("sudo") else ["pkexec", "bash", str(script)]
+            if self._prefer_pwless_sudo and shutil.which("sudo"):
+                cmd = ["sudo", "-n", "bash", str(script)]
+            elif shutil.which("pkexec"):
+                cmd = ["pkexec", "bash", str(script)]
+            elif shutil.which("sudo"):
+                cmd = ["sudo", "-n", "bash", str(script)]
             self._append("AUTO", f"$ {' '.join(cmd)}")
             try:
                 proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -572,19 +680,24 @@ class App:
             except Exception as exc:
                 self._append("AUTO", f"pkexec preflight failed: {exc}; falling back")
 
-        # Fallback discrete steps
+        # Fallback discrete steps (avoid shells to minimize prompts)
         self._run_cmd(["rfkill", "unblock", "all"], "AUTO", privileged=True)
         self._run_cmd(["modprobe", "iwlwifi"], "AUTO", privileged=True)
         self._run_cmd(["iw", "reg", "set", "US"], "AUTO", privileged=True)
         self._run_cmd(["mountpoint", "-q", "/sys/kernel/debug"], "AUTO")
         self._run_cmd(["mount", "-t", "debugfs", "debugfs", "/sys/kernel/debug"], "AUTO", privileged=True)
-        # Try to link ieee80211/.../iwlwifi to /sys/kernel/debug/iwlwifi
-        self._run_cmd(["bash", "-lc", "test -d /sys/kernel/debug/iwlwifi || ln -s $(find /sys/kernel/debug/ieee80211 -maxdepth 3 -type d -name iwlwifi | head -n1) /sys/kernel/debug/iwlwifi 2>/dev/null || true"], "AUTO", privileged=True)
+        # Try to link ieee80211/.../iwlwifi to /sys/kernel/debug/iwlwifi (find unprivileged, ln privileged)
+        from pathlib import Path as _P
+        if not _P("/sys/kernel/debug/iwlwifi").exists():
+            rc, txt = self._run_and_capture(["find", "/sys/kernel/debug/ieee80211", "-maxdepth", "3", "-type", "d", "-name", "iwlwifi"], "AUTO")
+            alt = txt.splitlines()[0].strip() if txt.strip() else ""
+            if alt:
+                self._run_cmd(["ln", "-s", alt, "/sys/kernel/debug/iwlwifi"], "AUTO", privileged=True)
         self._run_cmd(["/usr/sbin/setcap", "cap_net_admin,cap_net_raw+eip", "/usr/local/bin/feitcsi"], "AUTO", privileged=True)
         self._run_cmd(["setcap", "cap_net_admin,cap_net_raw+eip", "/usr/local/bin/feitcsi"], "AUTO", privileged=True)
 
     def _detect_wifi_devices(self) -> list[str]:
-        # Prefer nmcli (stable output). Fallback to iw if needed.
+        # Gather devices from nmcli and supplement with iw dev to include monitor ifaces
         rc, txt = self._run_and_capture(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"], "AUTO")
         devs: list[str] = []
         for line in txt.splitlines():
@@ -594,11 +707,9 @@ class App:
             if len(parts) < 3:
                 continue
             dev, typ, state = parts[0], parts[1], parts[2]
-            if typ.strip().lower() == "wifi":
+            if typ.strip().lower() in ("wifi", "802-11-wireless"):
                 devs.append(dev)
-        if devs:
-            return devs
-        # Fallback to iw dev parsing
+        # Also check iw for monitor/managed interfaces that nmcli may omit
         rc, txt = self._run_and_capture(["iw", "dev"], "AUTO")
         cur = None
         for line in txt.splitlines():
@@ -607,7 +718,7 @@ class App:
                 cur = line.split()[1]
             elif line.startswith("type ") and cur:
                 typ = line.split()[1]
-                if typ in ("managed", "station"):
+                if typ in ("managed", "station", "monitor"):
                     devs.append(cur)
                 cur = None
         return list(dict.fromkeys(devs))  # dedupe
@@ -616,17 +727,39 @@ class App:
         devs = self._detect_wifi_devices()
         self._wifi_devs = devs
         sel = self.wifi_device.get().strip()
+
+        # Proactively disconnect ALL managed wifi devices so monitor capture can work
+        rc, txt = self._run_and_capture(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"], "AUTO")
+        to_disconnect: list[str] = []
+        if rc == 0:
+            for line in txt.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 3:
+                    dev, typ, state = parts[0], parts[1], parts[2]
+                    if typ == "wifi" and dev and not dev.startswith("p2p-dev-"):
+                        to_disconnect.append(dev)
+        # If none reported by nmcli, fall back to best-effort using iw list
+        if not to_disconnect:
+            for d in devs:
+                if d and not d.startswith("p2p-dev-") and d != "lo":
+                    to_disconnect.append(d)
+
+        if to_disconnect:
+            names = ", ".join(to_disconnect)
+            self._append("AUTO", f"Disconnecting wifi devices: {names}…")
+            for d in to_disconnect:
+                self._run_cmd(["nmcli", "dev", "disconnect", d], "AUTO")
+
+        # Choose target (prefer the selected device if present)
         target = sel if sel in devs else (devs[0] if devs else "")
         if target:
             if sel and sel != target:
                 self.wifi_device.set(target)
-            self._append("AUTO", f"Disconnecting device {target}…")
-            self._run_cmd(["nmcli", "dev", "disconnect", target], "AUTO")
-            # Ensure interface stays up
+            # Ensure target interface is UP
             self._run_cmd(["ip", "link", "set", target, "up"], "AUTO", privileged=True)
         else:
-            # Fallback: radio off
-            self._append("AUTO", "No Wi‑Fi device found via nmcli/iw; falling back to radio off")
+            # Fallback: radio off to release stack
+            self._append("AUTO", "No Wi‑Fi device found via nmcli/iw; turning radio off")
             self._run_cmd(["nmcli", "radio", "wifi", "off"], "AUTO")
 
     def _populate_wifi_devices(self) -> None:
@@ -640,6 +773,7 @@ class App:
 
     def _update_pwless_status(self) -> None:
         ok = self._check_passwordless()
+        self._prefer_pwless_sudo = bool(ok)
         self.pwless_status.set("Passwordless: OK" if ok else "Passwordless: not configured")
 
     def setup_passwordless(self) -> None:
@@ -725,37 +859,60 @@ class App:
                 proc = subprocess.Popen(cap_cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
             self.cap_plog = ProcessLogger("FEIT", proc, self.out_q)
             self.cap_plog.start()
-
-            # Wait up to 6s for log to appear, else try privileged capture then retry next width
+            # Wait up to 6s for log to appear. If it shows up but the process
+            # exits immediately (e.g., debugfs permission denied), escalate to
+            # a privileged attempt before declaring success.
             if self._wait_for_file(log_path, 6.0):
-                self._append("FEIT", f"Log detected: {log_path}")
-                return True
-            else:
-                # Try elevated capture via pkexec/sudo
+                # Give the process a brief window to prove it's stable.
+                self._append("FEIT", f"Log detected: {log_path} (checking stability)")
+                time.sleep(1.0)
                 try:
-                    if shutil.which("sudo"):
-                        pcmd = ["sudo", "-n"] + cmd
-                    else:
-                        pcmd = ["pkexec"] + cmd
-                    self._append("FEIT", f"No log at {w} MHz; attempting privileged: {' '.join(pcmd)}")
-                    pproc = subprocess.Popen(pcmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-                    # Replace logger with new proc
+                    rc = proc.poll()
+                except Exception:
+                    rc = None
+                if rc is None:
+                    # Still running: accept this attempt.
+                    return True
+                else:
+                    self._append("FEIT", f"Capture exited early (rc={rc}); retrying with privileges…")
                     try:
                         self.cap_plog.stop()
-                    except Exception:
-                        pass
-                    self.cap_plog = ProcessLogger("FEIT", pproc, self.out_q)
-                    self.cap_plog.start()
-                    if self._wait_for_file(log_path, 6.0):
-                        self._append("FEIT", f"Log detected (privileged): {log_path}")
-                        return True
-                except Exception as exc:
-                    self._append("FEIT", f"Privileged attempt failed: {exc}")
-                self._append("FEIT", f"No log after attempt at {w} MHz; restarting capture…")
+                    finally:
+                        self.cap_plog = None
+
+            # Try elevated capture via pkexec/sudo (either no log or early exit)
+            try:
+                if shutil.which("sudo"):
+                    pcmd = ["sudo", "-n"] + cmd
+                else:
+                    pcmd = ["pkexec"] + cmd
+                self._append("FEIT", f"Attempting privileged: {' '.join(pcmd)}")
+                pproc = subprocess.Popen(pcmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                # Replace logger with new proc
                 try:
+                    if self.cap_plog:
+                        self.cap_plog.stop()
+                except Exception:
+                    pass
+                self.cap_plog = ProcessLogger("FEIT", pproc, self.out_q)
+                self.cap_plog.start()
+                if self._wait_for_file(log_path, 6.0):
+                    self._append("FEIT", f"Log detected (privileged): {log_path}")
+                    # Brief stability check again
+                    time.sleep(1.0)
+                    if pproc.poll() is None:
+                        return True
+                    else:
+                        self._append("FEIT", f"Privileged capture exited early (rc={pproc.returncode}); trying next width…")
+            except Exception as exc:
+                self._append("FEIT", f"Privileged attempt failed: {exc}")
+
+            self._append("FEIT", f"No stable log after attempt at {w} MHz; restarting capture…")
+            try:
+                if self.cap_plog:
                     self.cap_plog.stop()
-                finally:
-                    self.cap_plog = None
+            finally:
+                self.cap_plog = None
         return False
 
     def _on_close(self) -> None:

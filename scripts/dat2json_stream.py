@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import struct
+import sys
+import time
+
+
+def read_exact(f, n):
+    """Read exactly n bytes from file f, waiting for more if needed."""
+    buf = b""
+    while len(buf) < n:
+        chunk = f.read(n - len(buf))
+        if not chunk:
+            time.sleep(0.05)
+            continue
+        buf += chunk
+    return buf
+
+
+def try_read(f, n):
+    """Try to read up to n bytes; return bytes read (may be empty)."""
+    pos = f.tell()
+    data = f.read(n)
+    if len(data) < n:
+        # not enough data yet; rewind and let caller retry later
+        f.seek(pos)
+    return data
+
+
+def parse_frame(field: bytes):
+    """Parse one FeitCSI .dat frame payload into a magnitude array 2x56.
+
+    This matches FeitCSI's simple 2-RX x 56-subcarrier demo format used by
+    parse_csi.py bundled with the FeitCSI source.
+    """
+    if len(field) < 18:
+        return None
+    # count = struct.unpack('<H', field[14:16])[0]  # unused here
+    csi_raw = field[18:]
+    needed = 2 * 2 * 56 * 2  # rx * subc * (i,q) int8
+    if len(csi_raw) < needed:
+        return None
+    mags = []
+    for i in range(2 * 56):
+        r = struct.unpack('<b', csi_raw[2 * i : 2 * i + 1])[0]
+        im = struct.unpack('<b', csi_raw[2 * i + 1 : 2 * i + 2])[0]
+        mags.append((r * r + im * im) ** 0.5)
+    # reshape to 2 x 56
+    ch0 = mags[:56]
+    ch1 = mags[56:112]
+    return [ch0, ch1]
+
+
+def stream(in_path: str, out_path: str):
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    # Open input for reading; don't seek to end so we catch frames from start
+    with open(in_path, 'rb') as f_in, open(out_path, 'a', buffering=1) as f_out:
+        while True:
+            # Read 2-byte length prefix if available
+            hdr = try_read(f_in, 2)
+            if len(hdr) < 2:
+                time.sleep(0.05)
+                continue
+            (field_len,) = struct.unpack('<H', hdr)
+            field = try_read(f_in, field_len)
+            if len(field) < field_len:
+                time.sleep(0.05)
+                continue
+            csi = parse_frame(field)
+            if csi is None:
+                continue
+            pkt = {
+                'ts': time.time(),
+                'rssi': [-40.0, -40.0],  # placeholder; direction defaults to center
+                'csi': csi,
+            }
+            f_out.write(json.dumps(pkt) + '\n')
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Stream FeitCSI .dat to JSONL')
+    ap.add_argument('--in', dest='in_path', required=True, help='input .dat path')
+    ap.add_argument('--out', dest='out_path', required=True, help='output .log path (JSONL)')
+    args = ap.parse_args()
+    stream(args.in_path, args.out_path)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+
