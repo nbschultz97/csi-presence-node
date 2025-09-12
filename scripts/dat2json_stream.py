@@ -55,6 +55,13 @@ def parse_frame(field: bytes):
 
 def stream(in_path: str, out_path: str):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    # Wait for input file to appear
+    start = time.time()
+    while not os.path.exists(in_path):
+        time.sleep(0.1)
+        if time.time() - start > 12:
+            print(f"[error] input file not found: {in_path}", file=sys.stderr)
+            sys.exit(2)
     # Open input for reading; don't seek to end so we catch frames from start
     with open(in_path, 'rb') as f_in, open(out_path, 'a', buffering=1) as f_out:
         while True:
@@ -92,4 +99,3 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         sys.exit(0)
-

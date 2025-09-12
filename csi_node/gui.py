@@ -110,6 +110,7 @@ class App:
         self.pwless_status = StringVar(value="Passwordless: unknown")
 
         self.cap_plog: ProcessLogger | None = None
+        self.conv_plog: ProcessLogger | None = None
         self.pipe_plog: ProcessLogger | None = None
         self.out_q: queue.Queue = queue.Queue()
         self._workflow_thread: threading.Thread | None = None
@@ -391,8 +392,8 @@ class App:
                         raise RuntimeError("iface_root_failed")
                     # else: system Python started and is running
             except Exception:
-                # Fallback to file capture path
-                ok = self._start_capture_with_fallback()
+                # Fallback to .dat → JSONL capture path
+                ok = self._start_dat_jsonl_capture()
                 if not ok:
                     self._append("FEIT", "All capture attempts failed. See logs above.")
                     self.stop()
@@ -443,6 +444,12 @@ class App:
             self._append("PIPE", "Stopping pipeline…")
             self.pipe_plog.stop()
             self.pipe_plog = None
+        if self.conv_plog:
+            self._append("CONV", "Stopping converter…")
+            try:
+                self.conv_plog.stop()
+            finally:
+                self.conv_plog = None
         if self.cap_plog:
             self._append("FEIT", "Stopping capture…")
             self.cap_plog.stop()
@@ -453,6 +460,74 @@ class App:
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
         self._workflow_thread = None
+
+    def _start_dat_jsonl_capture(self) -> bool:
+        """Start FeitCSI writing .dat and launch dat→JSONL converter."""
+        if self.cap_plog:
+            try:
+                self.cap_plog.stop()
+            finally:
+                self.cap_plog = None
+        if self.conv_plog:
+            try:
+                self.conv_plog.stop()
+            finally:
+                self.conv_plog = None
+
+        ch = int(self.channel.get())
+        requested = int(self.width.get()) if self.width.get() > 0 else 20
+        freq = self._channel_to_freq(ch)
+        dat_path = DATA_DIR / "csi_raw.dat"
+        jsonl_path = DATA_DIR / "csi_raw.log"
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            for p in (dat_path, jsonl_path):
+                try:
+                    if p.exists():
+                        p.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        cmd = [
+            "/usr/local/bin/feitcsi",
+            "-f", str(freq),
+            "-w", str(requested),
+            "-o", str(dat_path),
+            "-v",
+        ]
+        self._append("FEIT", f"Attempting (dat): {' '.join(cmd)}")
+        try:
+            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        except FileNotFoundError:
+            self._append("FEIT", "FeitCSI binary not found at /usr/local/bin/feitcsi")
+            return False
+        self.cap_plog = ProcessLogger("FEIT", proc, self.out_q)
+        self.cap_plog.start()
+
+        # Wait for .dat to become non-empty
+        for _ in range(20):
+            try:
+                if dat_path.exists() and dat_path.stat().st_size > 0:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        if not dat_path.exists() or dat_path.stat().st_size == 0:
+            self._append("FEIT", f".dat not created or empty: {dat_path}")
+            return False
+
+        # Start converter
+        conv = [sys.executable, str(REPO_ROOT / "scripts" / "dat2json_stream.py"), "--in", str(dat_path), "--out", str(jsonl_path)]
+        self._append("CONV", f"Starting converter: {' '.join(conv)}")
+        try:
+            cproc = subprocess.Popen(conv, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+            self.conv_plog = ProcessLogger("CONV", cproc, self.out_q)
+            self.conv_plog.start()
+        except Exception as exc:
+            self._append("CONV", f"Failed to start converter: {exc}")
+        return True
 
     def run_diagnostics(self) -> None:
         t = threading.Thread(target=self._run_diagnostics, daemon=True)
