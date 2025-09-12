@@ -64,14 +64,21 @@ FREQ=$(freq_from_channel "$CH")
 echo "[CAP] Starting FeitCSI on ch $CH ($FREQ MHz), width $WIDTH → $CSI_DAT"
 rm -f "$CSI_DAT" "$CSI_LOG"
 (
-  sudo /usr/local/bin/feitcsi -f "$FREQ" -w "$WIDTH" -o "$CSI_DAT" \
+  sudo /usr/local/bin/feitcsi -f "$FREQ" -w "$WIDTH" -o "$CSI_DAT" -v \
     2>&1 | tee -a "$STDLOG"
 ) &
 FEIT_PID=$!
 
-sleep 0.5
-if [[ ! -e "$CSI_DAT" ]]; then
-  echo "[ERR] $CSI_DAT not created; see $STDLOG" >&2
+# Wait up to 12s for the .dat file to appear and become non-empty
+for i in {1..24}; do
+  if [[ -s "$CSI_DAT" ]]; then
+    break
+  fi
+  sleep 0.5
+done
+if [[ ! -s "$CSI_DAT" ]]; then
+  echo "[ERR] $CSI_DAT not created or still empty; recent FeitCSI log:" >&2
+  tail -n 80 "$STDLOG" >&2 || true
   exit 1
 fi
 
@@ -81,4 +88,3 @@ CONV_PID=$!
 
 echo "[PIPE] Launching pipeline TUI (log=$CSI_LOG)…"
 "$VENV_PY" "$ROOT_DIR/run.py" --tui
-
