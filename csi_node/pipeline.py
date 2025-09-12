@@ -13,7 +13,6 @@ from watchdog.events import FileSystemEventHandler
 from threading import Event, Thread
 
 from . import utils
-from .pose_classifier import PoseClassifier  # pose classifier for skeletal state
 from . import tui as tui_mod  # curses dashboard hooks
 from . import replay as replay_mod
 
@@ -183,9 +182,11 @@ def run_demo(
     if Path(cfg["baseline_file"]).exists():
         baseline = np.load(cfg["baseline_file"])["mean"]
 
-    pose_clf: PoseClassifier | None = None
+    pose_clf = None
     if pose:
         try:
+            # Lazy import to avoid scikit-learn dependency unless requested
+            from .pose_classifier import PoseClassifier
             pose_clf = PoseClassifier("models/wipose.joblib")
         except Exception as exc:  # pragma: no cover - classifier optional
             print(f"Pose classifier init failed: {exc}", file=sys.stderr)

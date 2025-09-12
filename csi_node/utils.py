@@ -9,7 +9,6 @@ import logging
 from pathlib import Path
 import numpy as np
 from typing import List, Optional, Dict
-from scipy.signal import savgol_filter as _savgol_filter
 
 
 def moving_median(data: np.ndarray, window: int) -> np.ndarray:
@@ -23,6 +22,15 @@ def moving_median(data: np.ndarray, window: int) -> np.ndarray:
 
 
 def savgol(data: np.ndarray, window: int, poly: int) -> np.ndarray:
+    """Apply Savitzky–Golay filter if SciPy is available, else return input.
+
+    SciPy is an optional dependency. To keep import-time light for offline
+    tests, we import on demand and gracefully fall back when unavailable.
+    """
+    try:
+        from scipy.signal import savgol_filter as _savgol_filter  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency
+        return data
     if window % 2 == 0:
         window += 1
     return _savgol_filter(data, window, poly, axis=0)
