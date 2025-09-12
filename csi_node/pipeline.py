@@ -34,12 +34,13 @@ def _check_log_fresh(path: Path) -> None:
 
 
 class CSILogHandler(FileSystemEventHandler):
-    def __init__(self, path: Path, buffer, process_cb):
+    def __init__(self, path: Path, buffer, process_cb, pkt_cb=None):
         if not path.exists():
             raise FileNotFoundError(_ERR_MSG)
         self.path = str(path)
         self.buffer = buffer
         self.process_cb = process_cb
+        self.pkt_cb = pkt_cb
         self._fp = open(self.path, "r")
         # Start tailing from end of current file contents
         self._fp.seek(0, 2)
@@ -81,6 +82,11 @@ class CSILogHandler(FileSystemEventHandler):
             pkt = utils.parse_csi_line(line)
             if pkt:
                 self.buffer.append(pkt)
+                if self.pkt_cb:
+                    try:
+                        self.pkt_cb()
+                    except Exception:
+                        pass
                 self.process_cb()
         self._size = self._fp.tell()
 
@@ -174,7 +180,9 @@ def run_demo(
     speed: float = 1.0,
 ) -> None:
     """Run realtime or replay pipeline with optional pose and TUI."""
-    cfg = yaml.safe_load(open("csi_node/config.yaml"))
+    # Load config relative to this file to avoid CWD issues
+    cfg_path = Path(__file__).resolve().parent / "config.yaml"
+    cfg = yaml.safe_load(open(cfg_path))
     cfg["window_size"] = window
     cfg["output_file"] = out
     buffer = deque()
@@ -207,6 +215,8 @@ def run_demo(
     }
     stop = Event()
     tui_thread = None
+    # Track whether any frames have arrived, to surface clearer diagnostics
+    first_frame_seen = Event()
     if tui:
         mode = "LIVE (FeitCSI)" if replay_path is None else "REPLAY"
         tui_thread = Thread(
@@ -215,6 +225,24 @@ def run_demo(
             daemon=True,
         )
         tui_thread.start()
+
+    # Emit a helpful status and enforce a timeout if no frames are seen
+    wait_timeout = float(cfg.get("frames_wait_timeout", 10.0))
+    print("[status] Waiting for frames…", file=sys.stderr)
+
+    def _timeout_watchdog():
+        deadline = time.time() + wait_timeout
+        while time.time() < deadline and not first_frame_seen.is_set() and not stop.is_set():
+            time.sleep(0.2)
+        if not first_frame_seen.is_set() and not stop.is_set():
+            print(
+                f"[error] No CSI frames received within {wait_timeout:.0f}s. "
+                "Ensure FeitCSI is installed, privileges are granted, and the NIC is free.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+
+    Thread(target=_timeout_watchdog, daemon=True).start()
 
     def handle(result: dict) -> None:
         nonlocal presence_ema, pose_ema, last_dir, l_cnt, r_cnt
@@ -263,6 +291,8 @@ def run_demo(
 
     def process() -> None:
         now = buffer[-1]["ts"]
+        if not first_frame_seen.is_set():
+            first_frame_seen.set()
         while buffer and now - buffer[0]["ts"] > cfg["window_size"]:
             buffer.popleft()
         start = now - cfg["window_size"]
@@ -275,12 +305,16 @@ def run_demo(
             if stop.is_set():
                 break
             buffer.append(pkt)
+            if not first_frame_seen.is_set():
+                first_frame_seen.set()
             process()
     elif replay_path:
         for pkt in replay_mod.replay(replay_path, speed):
             if stop.is_set():
                 break
             buffer.append(pkt)
+            if not first_frame_seen.is_set():
+                first_frame_seen.set()
             process()
     else:
         observer = Observer()
@@ -289,7 +323,7 @@ def run_demo(
         if not log_path.exists() and not utils.wait_for_file(log_path, wait):
             _capture_fail()
         _check_log_fresh(log_path)
-        handler = CSILogHandler(log_path, buffer, process)
+        handler = CSILogHandler(log_path, buffer, process, pkt_cb=lambda: first_frame_seen.set())
         observer.schedule(handler, str(log_path.parent), recursive=False)
         observer.start()
         try:
@@ -305,7 +339,9 @@ def run_demo(
         tui_thread.join()
 
 
-def run(config_path: str = "csi_node/config.yaml") -> None:
+def run(config_path: str | None = None) -> None:
+    if config_path is None:
+        config_path = str(Path(__file__).resolve().parent / "config.yaml")
     cfg = yaml.safe_load(open(config_path))
     buffer = deque()
     baseline = None

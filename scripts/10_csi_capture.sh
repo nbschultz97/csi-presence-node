@@ -42,12 +42,23 @@ STDLOG=./data/feitcsi.log
 
 mkdir -p ./data
 
+# JSON output is disabled by default. Set FEITCSI_JSON=1 to force if your
+# binary supports it. We do not auto-detect to avoid false positives.
+JSON_FLAGS=()
+if [[ "${FEITCSI_JSON:-}" == "1" ]]; then
+  JSON_FLAGS=(--json)
+fi
+
 freq=$(channel_to_freq "$CHANNEL")
-echo "Starting FeitCSI capture on channel $CHANNEL (${freq} MHz) width $WIDTH MHz coding $CODING" | tee -a "$STDLOG"
+if [[ ${#JSON_FLAGS[@]} -gt 0 ]]; then
+  echo "Starting FeitCSI capture on channel $CHANNEL (${freq} MHz) width $WIDTH MHz coding $CODING (JSON enabled)" | tee -a "$STDLOG"
+else
+  echo "Starting FeitCSI capture on channel $CHANNEL (${freq} MHz) width $WIDTH MHz coding $CODING" | tee -a "$STDLOG"
+fi
 
 tmp_err=$(mktemp)
 (
-  "$FEITCSI_BIN" -f "$freq" -w "$WIDTH" --coding "$CODING" -o "$LOG" \
+  "$FEITCSI_BIN" -f "$freq" -w "$WIDTH" --coding "$CODING" "${JSON_FLAGS[@]}" -o "$LOG" \
     2> >(tee "$tmp_err" | tee -a "$STDLOG" >&2) | tee -a "$STDLOG"
 ) &
 feitcsi_pid=$!
