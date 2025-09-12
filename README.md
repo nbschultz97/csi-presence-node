@@ -58,6 +58,84 @@ Baseline amplitudes for an empty room improve stability:
 python -m csi_node.baseline --duration 60
 ```
 
+## GUI launcher
+
+A minimal Tk GUI is included to start/stop capture and replay without the
+terminal.
+
+Run it:
+
+```bash
+# Install Tk if missing (Debian/Ubuntu/Kali)
+sudo apt-get install -y python3-tk
+
+# Launch the GUI (uses the project virtualenv if present)
+./scripts/launch_gui.sh
+```
+
+Add a desktop shortcut:
+
+```bash
+# If your checkout path differs, edit Exec/Path inside:
+sed -n '1,120p' scripts/csi-presence-gui.desktop
+
+# Then copy to your user applications dir
+cp scripts/csi-presence-gui.desktop ~/.local/share/applications/
+```
+
+Notes:
+- Live capture requires the FeitCSI binary and NIC privileges. Grant caps once
+  to avoid sudo: `sudo setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/feitcsi`.
+- The GUI streams logs and JSON outputs; it avoids the curses TUI.
+- Auto‑preflight: in Live mode the GUI will automatically disable Wi‑Fi,
+  unblock rfkill, load `iwlwifi`, set the reg domain, and attempt to grant
+  capabilities to FeitCSI before starting capture. It retries widths (chosen →
+  80 → 40 → 20 MHz) until `data/csi_raw.log` is detected.
+- Auto‑postflight: when you click Stop, the GUI re‑enables Wi‑Fi, restarts
+  NetworkManager (via systemd or service), turns networking back on, and tries
+  to reconnect to your previously active Wi‑Fi connection(s).
+- Diagnostics: click “Diagnostics” to generate `data/diagnostics-YYYYMMDD-HHMMSS.txt`
+  with system info, Wi‑Fi state, FeitCSI caps, recent logs, and filtered
+  kernel messages. The GUI opens the file after saving.
+
+### Permissions and password prompts
+
+FeitCSI relies on iwlwifi debugfs at `/sys/kernel/debug/iwlwifi` and wireless
+privileges. The GUI tries to run preflight and capture with `pkexec` (GUI
+authorization) or `sudo -n` where possible. To minimize prompts:
+
+- Grant FeitCSI capabilities (once):
+
+  sudo setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/feitcsi
+
+- Ensure debugfs is mounted (the GUI attempts this):
+
+  sudo mount -t debugfs debugfs /sys/kernel/debug
+
+- Optional: allow passwordless sudo for specific commands. Create a file via
+  `sudo visudo -f /etc/sudoers.d/csi-presence-node` with:
+
+  Cmnd_Alias CSI_CMDS = \
+    /usr/sbin/rfkill unblock all, \
+    /usr/sbin/modprobe iwlwifi, \
+    /usr/sbin/setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/feitcsi, \
+    /usr/bin/iw reg set US, \
+    /bin/systemctl restart NetworkManager, \
+    /bin/systemctl start NetworkManager, \
+    /usr/bin/mount -t debugfs debugfs /sys/kernel/debug, \
+    /usr/local/bin/feitcsi *
+
+  yourusername ALL=(root) NOPASSWD: CSI_CMDS
+
+Replace `yourusername` with your login name. Reopen the GUI after changes.
+
+If reconnection does not happen automatically
+- Your desktop may require interactive authorization for restarting
+  NetworkManager. In that case, either approve the `pkexec` prompt or pre‑grant
+  permissions, or reconnect manually with:
+  - `nmcli networking on && nmcli radio wifi on`
+  - `nmcli connection up id <YourSSID>` (or `nmcli connection up uuid <UUID>`)
+
 ## Demo mode
 
 `demo.sh` runs a quick self‑test: it checks the FeitCSI binary, captures CSI for

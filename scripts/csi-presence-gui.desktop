@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=CSI Presence GUI
+Comment=Run WiFi CSI presence detection with a simple UI
+Exec=/home/vantage/csi-presence-node/scripts/launch_gui.sh
+Path=/home/vantage/csi-presence-node
+Icon=network-wireless
+Terminal=false
+Categories=Utility;Network;
+X-GNOME-Autostart-enabled=false
