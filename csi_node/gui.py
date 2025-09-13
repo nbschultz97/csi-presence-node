@@ -685,13 +685,23 @@ class App:
         self._append("AUTO", "Re-enabling Wi‑Fi and restarting NetworkManager…")
         # Unblock rfkill regardless
         self._run_cmd(["rfkill", "unblock", "all"], "AUTO", privileged=True)
-        # Try systemd restart, fallback to service
+        # Try systemd restart, fallback to service; also restart wpa_supplicant
         rc = self._run_cmd(["systemctl", "restart", "NetworkManager"], "AUTO", privileged=True)
         if rc != 0:
             self._run_cmd(["service", "NetworkManager", "restart"], "AUTO", privileged=True)
+        rc = self._run_cmd(["systemctl", "restart", "wpa_supplicant"], "AUTO", privileged=True)
+        if rc != 0:
+            self._run_cmd(["service", "wpa_supplicant", "restart"], "AUTO", privileged=True)
         # Ensure networking/wifi are on
         self._run_cmd(["nmcli", "networking", "on"], "AUTO")
         self._run_cmd(["nmcli", "radio", "wifi", "on"], "AUTO")
+        # Put previously used wifi devices back under NetworkManager control
+        for dev in self._wifi_devs:
+            self._run_cmd(["nmcli", "dev", "set", dev, "managed", "yes"], "AUTO", privileged=True)
+            # Bring the link up in case it was left down
+            self._run_cmd(["ip", "link", "set", dev, "up"], "AUTO", privileged=True)
+        # Trigger a scan to force the stack into an available state
+        self._run_cmd(["nmcli", "device", "wifi", "rescan"], "AUTO")
         time.sleep(2.0)
 
     def _snapshot_active_connections(self) -> None:
@@ -725,7 +735,47 @@ class App:
             rc = self._run_cmd(["nmcli", "connection", "up", "uuid", uuid], "AUTO")
             if rc != 0:
                 self._run_cmd(["nmcli", "connection", "up", "id", name], "AUTO")
+                uuid = ""  # fallback used id; uuid may not match
+            self._ensure_autoconnect(name, uuid)
         self._prev_active_cons = []
+
+    def _ensure_autoconnect(self, name: str, uuid: str) -> None:
+        """Force NetworkManager to autoconnect to the restored Wi‑Fi profile."""
+        self._append("AUTO", f"Ensuring autoconnect for '{name}'…")
+        rc = self._run_cmd(
+            ["nmcli", "connection", "modify", "uuid", uuid, "connection.autoconnect", "yes"],
+            "AUTO",
+        )
+        if rc != 0:
+            self._run_cmd(
+                ["nmcli", "connection", "modify", "id", name, "connection.autoconnect", "yes"],
+                "AUTO",
+            )
+        rc = self._run_cmd(
+            [
+                "nmcli",
+                "connection",
+                "modify",
+                "uuid",
+                uuid,
+                "connection.autoconnect-priority",
+                "100",
+            ],
+            "AUTO",
+        )
+        if rc != 0:
+            self._run_cmd(
+                [
+                    "nmcli",
+                    "connection",
+                    "modify",
+                    "id",
+                    name,
+                    "connection.autoconnect-priority",
+                    "100",
+                ],
+                "AUTO",
+            )
 
     def _run_root_preflight(self) -> None:
         """Run all privileged preflight actions in one pkexec call.
