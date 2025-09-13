@@ -725,7 +725,47 @@ class App:
             rc = self._run_cmd(["nmcli", "connection", "up", "uuid", uuid], "AUTO")
             if rc != 0:
                 self._run_cmd(["nmcli", "connection", "up", "id", name], "AUTO")
+                uuid = ""  # fallback used id; uuid may not match
+            self._ensure_autoconnect(name, uuid)
         self._prev_active_cons = []
+
+    def _ensure_autoconnect(self, name: str, uuid: str) -> None:
+        """Force NetworkManager to autoconnect to the restored Wi‑Fi profile."""
+        self._append("AUTO", f"Ensuring autoconnect for '{name}'…")
+        rc = self._run_cmd(
+            ["nmcli", "connection", "modify", "uuid", uuid, "connection.autoconnect", "yes"],
+            "AUTO",
+        )
+        if rc != 0:
+            self._run_cmd(
+                ["nmcli", "connection", "modify", "id", name, "connection.autoconnect", "yes"],
+                "AUTO",
+            )
+        rc = self._run_cmd(
+            [
+                "nmcli",
+                "connection",
+                "modify",
+                "uuid",
+                uuid,
+                "connection.autoconnect-priority",
+                "100",
+            ],
+            "AUTO",
+        )
+        if rc != 0:
+            self._run_cmd(
+                [
+                    "nmcli",
+                    "connection",
+                    "modify",
+                    "id",
+                    name,
+                    "connection.autoconnect-priority",
+                    "100",
+                ],
+                "AUTO",
+            )
 
     def _run_root_preflight(self) -> None:
         """Run all privileged preflight actions in one pkexec call.
