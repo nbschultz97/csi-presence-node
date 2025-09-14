@@ -155,7 +155,9 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
         elif diff < -delta:
             direction = "R"
     avg_rssi = (rssi0 + rssi1) / 2.0
-    distance = utils.rssi_to_distance(avg_rssi)
+    txp = float(cfg.get("tx_power_dbm", -40.0))
+    ple = float(cfg.get("path_loss_exponent", 2.0))
+    distance = utils.rssi_to_distance(avg_rssi, txp, ple)
     presence = int(var > cfg["variance_threshold"] or pca1 > cfg["pca_threshold"])
     return {
         "presence": presence,
