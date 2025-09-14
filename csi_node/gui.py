@@ -110,6 +110,8 @@ class App:
         self.output_file = StringVar(value=str(Path(cfg.get("output_file", "data/presence_log.jsonl"))))
         self.autoscroll = BooleanVar(value=True)
         self.pwless_status = StringVar(value="Passwordless: unknown")
+        # Dat-mode RSSI offset to align derived RSSI to dBm-like scale
+        self.dat_rssi_offset = DoubleVar(value=float(cfg.get("dat_rssi_offset", -60.0)))
 
         self.cap_plog: ProcessLogger | None = None
         self.conv_plog: ProcessLogger | None = None
@@ -132,6 +134,9 @@ class App:
         tools.add_separator()
         tools.add_command(label="Setup Passwordless sudo…", command=self.setup_passwordless)
         tools.add_command(label="Fix Wi‑Fi Profile…", command=self.fix_wifi_profile)
+        tools.add_separator()
+        tools.add_command(label="Calibrate Distance…", command=self.calibrate_distance)
+        tools.add_command(label="Edit Thresholds…", command=self.edit_thresholds)
         menubar.add_cascade(label="Tools", menu=tools)
         self.root.config(menu=menubar)
 
@@ -159,6 +164,8 @@ class App:
         ttk.Combobox(live_frame, textvariable=self.coding, values=["BCC", "LDPC"], width=10, state="readonly").grid(row=0, column=8, sticky="w", padx=6, pady=4)
         ttk.Checkbutton(live_frame, text="Pose", variable=self.pose).grid(row=0, column=9, sticky="w", padx=6, pady=4)
         ttk.Checkbutton(live_frame, text="Dat mode", variable=self.dat_mode).grid(row=0, column=10, sticky="w", padx=6, pady=4)
+        ttk.Label(live_frame, text="RSSI offset").grid(row=0, column=11, sticky="w", padx=6, pady=4)
+        ttk.Entry(live_frame, textvariable=self.dat_rssi_offset, width=8).grid(row=0, column=12, sticky="w", padx=6, pady=4)
 
         # Replay settings
         rep_frame = ttk.LabelFrame(frm, text="Replay Settings")
@@ -609,7 +616,9 @@ class App:
         conv = [sys.executable, str(REPO_ROOT / "scripts" / "dat2json_stream.py"), "--in", str(dat_path), "--out", str(jsonl_path)]
         self._append("CONV", f"Starting converter: {' '.join(conv)}")
         try:
-            cproc = subprocess.Popen(conv, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+            env = os.environ.copy()
+            env["DAT_RSSI_OFFSET"] = str(self.dat_rssi_offset.get())
+            cproc = subprocess.Popen(conv, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
             self.conv_plog = ProcessLogger("CONV", cproc, self.out_q)
             self.conv_plog.start()
         except Exception as exc:
@@ -1113,6 +1122,73 @@ class App:
             self._append("AUTO", "No Wi‑Fi profiles required changes.")
         # Attempt to reconnect previous Wi‑Fi connections
         self._reconnect_previous_connections()
+
+    def edit_thresholds(self) -> None:
+        """Edit processing thresholds and distance params in config.yaml."""
+        try:
+            cfg = yaml.safe_load(open(DEFAULT_CFG)) if (yaml and DEFAULT_CFG.exists()) else {}
+        except Exception as exc:
+            messagebox.showerror("Edit Thresholds", f"Failed to load config: {exc}")
+            return
+        def _ask_float(title: str, key: str, default: float) -> float | None:
+            val = cfg.get(key, default)
+            try:
+                return simpledialog.askfloat(title, f"{key}", initialvalue=float(val))
+            except Exception:
+                return None
+        updates = {}
+        for (key, default) in (
+            ("variance_threshold", 5.0),
+            ("pca_threshold", 1.0),
+            ("rssi_delta", 2.0),
+            ("dat_rssi_offset", -60.0),
+            ("tx_power_dbm", -40.0),
+            ("path_loss_exponent", 2.0),
+        ):
+            v = _ask_float("Edit Thresholds", key, default)
+            if v is None:
+                continue
+            updates[key] = float(v)
+        if not updates:
+            return
+        try:
+            cfg.update(updates)
+            with open(DEFAULT_CFG, "w") as f:
+                yaml.safe_dump(cfg, f, sort_keys=False)
+            self._append("INFO", f"Updated config: {', '.join(f'{k}={v}' for k,v in updates.items())}")
+        except Exception as exc:
+            messagebox.showerror("Edit Thresholds", f"Failed to write config: {exc}")
+
+    def calibrate_distance(self) -> None:
+        """Run distance calibration helper from the GUI."""
+        # Choose two logs
+        path1 = filedialog.askopenfilename(title="Select first log (at distance d1)", filetypes=[("JSONL", ".log"), ("All files", "*.*")])
+        if not path1:
+            return
+        d1 = simpledialog.askfloat("Calibrate Distance", "Enter distance d1 (meters)", initialvalue=1.0)
+        if not d1:
+            return
+        path2 = filedialog.askopenfilename(title="Select second log (at distance d2)", filetypes=[("JSONL", ".log"), ("All files", "*.*")])
+        if not path2:
+            return
+        d2 = simpledialog.askfloat("Calibrate Distance", "Enter distance d2 (meters)", initialvalue=3.0)
+        if not d2:
+            return
+        cmd = [sys.executable, "-m", "csi_node.calibrate", "--log1", path1, "--d1", str(d1), "--log2", path2, "--d2", str(d2), "--config", str(DEFAULT_CFG)]
+        self._append("CAL", f"Running: {' '.join(cmd)}")
+        try:
+            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out, err = proc.communicate()
+            for line in (out or "").splitlines():
+                self._append("CAL", line)
+            for line in (err or "").splitlines():
+                self._append("CAL", line)
+            if proc.returncode == 0:
+                self._append("CAL", "Calibration complete and written to config.")
+            else:
+                self._append("CAL", f"Calibration exited with code {proc.returncode}")
+        except Exception as exc:
+            messagebox.showerror("Calibrate Distance", f"Failed to run calibrator: {exc}")
 
     def _check_passwordless(self) -> bool:
         """Return True if `sudo -n` works for at least our needed commands.
