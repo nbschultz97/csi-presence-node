@@ -103,6 +103,8 @@ class App:
         self.coding = StringVar(value="BCC")
         self.wifi_device = StringVar(value="")
         self.pose = BooleanVar(value=False)
+        # When enabled, skip Python FeitCSI interface and use .dat → JSONL path
+        self.dat_mode = BooleanVar(value=False)
         self.replay_path = StringVar(value=str((REPO_ROOT / "data" / "sample_csi.b64")))
         self.speed = DoubleVar(value=1.0)
         self.output_file = StringVar(value=str(Path(cfg.get("output_file", "data/presence_log.jsonl"))))
@@ -129,6 +131,7 @@ class App:
         tools.add_command(label="Diagnostics", command=self.run_diagnostics)
         tools.add_separator()
         tools.add_command(label="Setup Passwordless sudo…", command=self.setup_passwordless)
+        tools.add_command(label="Fix Wi‑Fi Profile…", command=self.fix_wifi_profile)
         menubar.add_cascade(label="Tools", menu=tools)
         self.root.config(menu=menubar)
 
@@ -155,6 +158,7 @@ class App:
         ttk.Label(live_frame, text="Coding").grid(row=0, column=7, sticky="w", padx=6, pady=4)
         ttk.Combobox(live_frame, textvariable=self.coding, values=["BCC", "LDPC"], width=10, state="readonly").grid(row=0, column=8, sticky="w", padx=6, pady=4)
         ttk.Checkbutton(live_frame, text="Pose", variable=self.pose).grid(row=0, column=9, sticky="w", padx=6, pady=4)
+        ttk.Checkbutton(live_frame, text="Dat mode", variable=self.dat_mode).grid(row=0, column=10, sticky="w", padx=6, pady=4)
 
         # Replay settings
         rep_frame = ttk.LabelFrame(frm, text="Replay Settings")
@@ -308,6 +312,36 @@ class App:
             # Prefer direct FeitCSI Python interface (no file tail). If the
             # pipeline exits immediately (module missing or permission issue),
             # fall back to file-based capture.
+            if self.dat_mode.get():
+                ok = self._start_dat_jsonl_capture()
+                if not ok:
+                    self._append("FEIT", "Dat mode start failed. See logs above.")
+                    self.stop()
+                    return
+                # Wait until log file exists and is non-empty
+                if not self._wait_for_file(REPO_ROOT / "data" / "csi_raw.log", 10.0):
+                    self._append("FEIT", "Log not created after capture start; aborting.")
+                    self.stop()
+                    return
+                # Start pipeline to tail file (unprivileged)
+                pipe_cmd = [sys.executable, str(REPO_ROOT / "run.py"), "--out", out]
+                if pose_flag:
+                    pipe_cmd.append(pose_flag)
+                self._append("PIPE", f"Starting pipeline (file): {' '.join(pipe_cmd)}")
+                try:
+                    pipe_proc = subprocess.Popen(
+                        pipe_cmd,
+                        cwd=str(REPO_ROOT),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        bufsize=1,
+                    )
+                    self.pipe_plog = ProcessLogger("PIPE", pipe_proc, self.out_q)
+                    self.pipe_plog.start()
+                except Exception as exc:
+                    self._append("PIPE", f"Failed to start pipeline: {exc}")
+                return
             dev = self.wifi_device.get().strip()
             if not dev:
                 # Try to populate and pick first available
@@ -454,6 +488,8 @@ class App:
             self._append("FEIT", "Stopping capture…")
             self.cap_plog.stop()
             self.cap_plog = None
+        # Clean up FeitCSI-created interfaces if present to restore normal state
+        self._cleanup_feit_ifaces()
         # Bring networking back up and try to reconnect saved Wi‑Fi
         self._restart_networking()
         self._reconnect_previous_connections()
@@ -461,8 +497,20 @@ class App:
         self.btn_stop.config(state="disabled")
         self._workflow_thread = None
 
+    def _cleanup_feit_ifaces(self) -> None:
+        """Remove FeitCSImon/FeitCSIap interfaces if they linger after capture."""
+        for dev in ("FeitCSImon", "FeitCSIap"):
+            self._run_cmd(["ip", "link", "set", dev, "down"], "AUTO", privileged=True)
+            # `iw dev <iface> del` removes the interface when supported
+            self._run_cmd(["iw", "dev", dev, "del"], "AUTO", privileged=True)
+
     def _start_dat_jsonl_capture(self) -> bool:
-        """Start FeitCSI writing .dat and launch dat→JSONL converter."""
+        """Start FeitCSI writing .dat and launch dat→JSONL converter.
+
+        Tries the requested width, then falls back to 80 → 40 → 20. If the
+        channel is > 14 (5 GHz) and all widths fail, try channel 1 (2.4 GHz)
+        with the same fallback widths.
+        """
         if self.cap_plog:
             try:
                 self.cap_plog.stop()
@@ -476,7 +524,6 @@ class App:
 
         ch = int(self.channel.get())
         requested = int(self.width.get()) if self.width.get() > 0 else 20
-        freq = self._channel_to_freq(ch)
         dat_path = DATA_DIR / "csi_raw.dat"
         jsonl_path = DATA_DIR / "csi_raw.log"
         try:
@@ -490,33 +537,73 @@ class App:
         except Exception:
             pass
 
-        cmd = [
-            "/usr/local/bin/feitcsi",
-            "-f", str(freq),
-            "-w", str(requested),
-            "-o", str(dat_path),
-            "-v",
-        ]
-        self._append("FEIT", f"Attempting (dat): {' '.join(cmd)}")
-        try:
-            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-        except FileNotFoundError:
-            self._append("FEIT", "FeitCSI binary not found at /usr/local/bin/feitcsi")
-            return False
-        self.cap_plog = ProcessLogger("FEIT", proc, self.out_q)
-        self.cap_plog.start()
-
-        # Wait for .dat to become non-empty
-        for _ in range(20):
+        def _try_once(channel: int, width: int) -> bool:
+            freq = self._channel_to_freq(channel)
+            cmd = [
+                "/usr/local/bin/feitcsi",
+                "-f", str(freq),
+                "-w", str(width),
+                "-o", str(dat_path),
+                "-v",
+            ]
+            full_cmd = cmd
+            if self._prefer_pwless_sudo and shutil.which("sudo"):
+                full_cmd = ["sudo", "-n"] + cmd
+            elif shutil.which("pkexec"):
+                full_cmd = ["pkexec"] + cmd
+            elif shutil.which("sudo"):
+                full_cmd = ["sudo"] + cmd
+            self._append("FEIT", f"Attempting (dat): {' '.join(full_cmd)}")
             try:
-                if dat_path.exists() and dat_path.stat().st_size > 0:
-                    break
+                proc = subprocess.Popen(full_cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+            except FileNotFoundError:
+                self._append("FEIT", "FeitCSI binary not found at /usr/local/bin/feitcsi")
+                return False
+            self.cap_plog = ProcessLogger("FEIT", proc, self.out_q)
+            self.cap_plog.start()
+            # Wait for .dat to become non-empty
+            for _ in range(24):
+                try:
+                    if dat_path.exists() and dat_path.stat().st_size > 0:
+                        self._append("FEIT", f".dat active: {dat_path}")
+                        return True
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            # Stop this attempt if no data
+            try:
+                self.cap_plog.stop()
             except Exception:
                 pass
-            time.sleep(0.5)
-        if not dat_path.exists() or dat_path.stat().st_size == 0:
+            self.cap_plog = None
             self._append("FEIT", f".dat not created or empty: {dat_path}")
             return False
+
+        tried = []
+        widths = []
+        for w in (requested, 80, 40, 20):
+            if w > 0 and w not in widths:
+                widths.append(w)
+
+        # First try requested channel with fallback widths
+        for w in widths:
+            if _try_once(ch, w):
+                break
+            tried.append((ch, w))
+        else:
+            # If on 5 GHz, try 2.4 GHz channel 1 with width fallbacks
+            if ch > 14:
+                for w in widths:
+                    if _try_once(1, w):
+                        ch = 1  # reflect the channel actually used
+                        break
+                    tried.append((1, w))
+                else:
+                    self._append("FEIT", f"All attempts failed: {tried}")
+                    return False
+            else:
+                self._append("FEIT", f"All attempts failed: {tried}")
+                return False
 
         # Start converter
         conv = [sys.executable, str(REPO_ROOT / "scripts" / "dat2json_stream.py"), "--in", str(dat_path), "--out", str(jsonl_path)]
@@ -527,6 +614,15 @@ class App:
             self.conv_plog.start()
         except Exception as exc:
             self._append("CONV", f"Failed to start converter: {exc}")
+        # Confirm JSON log starts writing
+        for _ in range(40):
+            try:
+                if jsonl_path.exists() and jsonl_path.stat().st_size > 0:
+                    self._append("CONV", f"JSON log active: {jsonl_path}")
+                    break
+            except Exception:
+                pass
+            time.sleep(0.25)
         return True
 
     def run_diagnostics(self) -> None:
@@ -536,13 +632,14 @@ class App:
     def _run_and_capture(self, cmd: list[str], tag: str, privileged: bool = False, timeout: float | None = None) -> tuple[int, str]:
         full_cmd = cmd
         if privileged:
-            # Prefer sudo -n (works with passwordless sudo); fallback to pkexec
-            if shutil.which("sudo"):
+            # Prefer passwordless sudo when configured; otherwise prefer pkexec
+            # (GUI prompt). Fallback to sudo without -n as a last resort.
+            if getattr(self, "_prefer_pwless_sudo", False) and shutil.which("sudo"):
                 full_cmd = ["sudo", "-n"] + cmd
             elif shutil.which("pkexec"):
                 full_cmd = ["pkexec"] + cmd
-            else:
-                full_cmd = ["sudo", "-n"] + cmd
+            elif shutil.which("sudo"):
+                full_cmd = ["sudo"] + cmd
         self._append(tag, f"$ {' '.join(full_cmd)}")
         combined_lines: list[str] = []
         try:
@@ -653,13 +750,14 @@ class App:
         self._disconnect_wifi_devices()
         # 2–6) Combined privileged steps in one call to reduce prompts
         self._run_root_preflight()
-        # 7) Verify iwlwifi debugfs exists (check as root to avoid PermissionError)
-        dbg_path = "/sys/kernel/debug/iwlwifi"
-        rc = self._run_cmd(["bash", "-lc", f"test -e {dbg_path}"], "AUTO", privileged=True)
-        if rc != 0:
-            self._append("AUTO", "iwlwifi debugfs not found after mount/link. Ensure FeitCSI iwlwifi module is loaded.")
-        else:
-            self._append("AUTO", "iwlwifi debugfs present.")
+        # 7) Verify iwlwifi debugfs exists (unprivileged existence check)
+        try:
+            if Path("/sys/kernel/debug/iwlwifi").exists():
+                self._append("AUTO", "iwlwifi debugfs present.")
+            else:
+                self._append("AUTO", "iwlwifi debugfs not found after mount/link. Ensure FeitCSI iwlwifi module is loaded.")
+        except Exception:
+            self._append("AUTO", "iwlwifi debugfs check inconclusive (permission). Proceeding…")
 
     @staticmethod
     def _channel_to_freq(ch: int) -> int:
@@ -702,7 +800,45 @@ class App:
             self._run_cmd(["ip", "link", "set", dev, "up"], "AUTO", privileged=True)
         # Trigger a scan to force the stack into an available state
         self._run_cmd(["nmcli", "device", "wifi", "rescan"], "AUTO")
-        time.sleep(2.0)
+        # Wait for devices to become available again; if not, reload driver
+        available = self._wait_wifi_available(timeout=8.0)
+        if not available:
+            self._append("AUTO", "Wi‑Fi still unavailable; reloading iwlwifi driver…")
+            # Best effort: remove and reload iwlwifi/iwlmvm
+            self._run_cmd(["modprobe", "-r", "iwlmvm"], "AUTO", privileged=True)
+            self._run_cmd(["modprobe", "-r", "iwlwifi"], "AUTO", privileged=True)
+            self._run_cmd(["modprobe", "iwlwifi"], "AUTO", privileged=True)
+            # Ensure rfkill/networking/radio are up again
+            self._run_cmd(["rfkill", "unblock", "all"], "AUTO", privileged=True)
+            self._run_cmd(["nmcli", "networking", "on"], "AUTO")
+            self._run_cmd(["nmcli", "radio", "wifi", "on"], "AUTO")
+            self._wait_wifi_available(timeout=8.0)
+
+    def _wait_wifi_available(self, dev: str | None = None, timeout: float = 10.0) -> bool:
+        """Wait until Wi‑Fi device is not 'unavailable' according to nmcli.
+
+        If ``dev`` is None, use the selected device or any Wi‑Fi device found.
+        Returns True if available; False if timeout.
+        """
+        import time as _t
+        # Pick a device
+        if not dev:
+            dev = self.wifi_device.get().strip()
+            if not dev:
+                devs = self._detect_wifi_devices()
+                dev = devs[0] if devs else ""
+        end = _t.time() + timeout
+        while _t.time() < end:
+            rc, txt = self._run_and_capture(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"], "AUTO")
+            if rc == 0:
+                for line in txt.splitlines():
+                    parts = line.split(":")
+                    if len(parts) >= 3 and parts[0] == dev and parts[1] in ("wifi", "802-11-wireless"):
+                        state = parts[2]
+                        if "unavailable" not in state:
+                            return True
+            _t.sleep(0.5)
+        return False
 
     def _snapshot_active_connections(self) -> None:
         rc, txt = self._run_and_capture([
@@ -734,48 +870,56 @@ class App:
             self._append("AUTO", f"Reconnecting to '{name}' ({uuid})…")
             rc = self._run_cmd(["nmcli", "connection", "up", "uuid", uuid], "AUTO")
             if rc != 0:
-                self._run_cmd(["nmcli", "connection", "up", "id", name], "AUTO")
+                # Attempt to bring up by id; if that fails due to interface
+                # binding, clear the binding and retry.
+                rc2 = self._run_cmd(["nmcli", "connection", "up", "id", name], "AUTO")
+                if rc2 != 0:
+                    self._maybe_fix_nm_interface_binding(name)
+                    self._run_cmd(["nmcli", "connection", "up", "id", name], "AUTO")
                 uuid = ""  # fallback used id; uuid may not match
             self._ensure_autoconnect(name, uuid)
         self._prev_active_cons = []
 
+    def _maybe_fix_nm_interface_binding(self, name: str) -> None:
+        """If the connection is pinned to the wrong interface (e.g., eth0), clear it.
+
+        This addresses errors like:
+        "device eth0 not available because profile is not compatible with device (mismatching interface name)"
+        """
+        self._append("AUTO", f"Checking interface binding for '{name}'…")
+        rc, out = self._run_and_capture(["nmcli", "-g", "connection.interface-name", "connection", "show", "id", name], "AUTO")
+        if rc == 0:
+            iface = (out or "").strip()
+            if iface and iface != "wlan0":
+                self._append("AUTO", f"Clearing mismatched interface-name '{iface}' on '{name}'")
+                self._run_cmd(["nmcli", "connection", "modify", "id", name, "connection.interface-name", ""], "AUTO")
+
     def _ensure_autoconnect(self, name: str, uuid: str) -> None:
         """Force NetworkManager to autoconnect to the restored Wi‑Fi profile."""
         self._append("AUTO", f"Ensuring autoconnect for '{name}'…")
-        rc = self._run_cmd(
-            ["nmcli", "connection", "modify", "uuid", uuid, "connection.autoconnect", "yes"],
-            "AUTO",
-        )
-        if rc != 0:
-            self._run_cmd(
-                ["nmcli", "connection", "modify", "id", name, "connection.autoconnect", "yes"],
-                "AUTO",
-            )
-        rc = self._run_cmd(
-            [
-                "nmcli",
-                "connection",
-                "modify",
-                "uuid",
-                uuid,
-                "connection.autoconnect-priority",
-                "100",
-            ],
-            "AUTO",
-        )
-        if rc != 0:
-            self._run_cmd(
-                [
-                    "nmcli",
-                    "connection",
-                    "modify",
-                    "id",
-                    name,
-                    "connection.autoconnect-priority",
-                    "100",
-                ],
-                "AUTO",
-            )
+        if uuid:
+            rc = self._run_cmd([
+                "nmcli", "connection", "modify", "uuid", uuid, "connection.autoconnect", "yes"
+            ], "AUTO")
+            if rc != 0:
+                self._run_cmd([
+                    "nmcli", "connection", "modify", "id", name, "connection.autoconnect", "yes"
+                ], "AUTO")
+            rc = self._run_cmd([
+                "nmcli", "connection", "modify", "uuid", uuid, "connection.autoconnect-priority", "100"
+            ], "AUTO")
+            if rc != 0:
+                self._run_cmd([
+                    "nmcli", "connection", "modify", "id", name, "connection.autoconnect-priority", "100"
+                ], "AUTO")
+        else:
+            # No UUID; best-effort by id only
+            self._run_cmd([
+                "nmcli", "connection", "modify", "id", name, "connection.autoconnect", "yes"
+            ], "AUTO")
+            self._run_cmd([
+                "nmcli", "connection", "modify", "id", name, "connection.autoconnect-priority", "100"
+            ], "AUTO")
 
     def _run_root_preflight(self) -> None:
         """Run all privileged preflight actions in one pkexec call.
@@ -784,12 +928,14 @@ class App:
         """
         script = REPO_ROOT / "scripts" / "preflight_root.sh"
         if script.exists():
-            if self._prefer_pwless_sudo and shutil.which("sudo"):
-                cmd = ["sudo", "-n", "bash", str(script)]
-            elif shutil.which("pkexec"):
+            # Prefer a single pkexec prompt for the entire preflight script.
+            # Per-step commands later use passwordless sudo when configured.
+            if shutil.which("pkexec"):
                 cmd = ["pkexec", "bash", str(script)]
-            elif shutil.which("sudo"):
+            elif self._prefer_pwless_sudo and shutil.which("sudo"):
                 cmd = ["sudo", "-n", "bash", str(script)]
+            elif shutil.which("sudo"):
+                cmd = ["sudo", "bash", str(script)]
             self._append("AUTO", f"$ {' '.join(cmd)}")
             try:
                 proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -833,6 +979,9 @@ class App:
                 continue
             dev, typ, state = parts[0], parts[1], parts[2]
             if typ.strip().lower() in ("wifi", "802-11-wireless"):
+                # Exclude FeitCSI temporary and P2P interfaces from selection
+                if dev.startswith("FeitCSI") or dev.startswith("p2p-dev-"):
+                    continue
                 devs.append(dev)
         # Also check iw for monitor/managed interfaces that nmcli may omit
         rc, txt = self._run_and_capture(["iw", "dev"], "AUTO")
@@ -843,10 +992,17 @@ class App:
                 cur = line.split()[1]
             elif line.startswith("type ") and cur:
                 typ = line.split()[1]
-                if typ in ("managed", "station", "monitor"):
-                    devs.append(cur)
+                # Only include managed/station; skip monitor and FeitCSI temporary ifaces
+                if typ in ("managed", "station"):
+                    if cur.startswith("FeitCSI") or cur.startswith("p2p-dev-"):
+                        cur = None
+                    else:
+                        devs.append(cur)
                 cur = None
-        return list(dict.fromkeys(devs))  # dedupe
+        # Dedupe and prefer wlan* first for nicer UX
+        uniq = list(dict.fromkeys(devs))
+        uniq.sort(key=lambda d: (not d.startswith("wlan"), d))
+        return uniq
 
     def _disconnect_wifi_devices(self) -> None:
         devs = self._detect_wifi_devices()
@@ -893,8 +1049,14 @@ class App:
             self.dev_combo["values"] = devs
         except Exception:
             pass
-        if devs and not self.wifi_device.get():
-            self.wifi_device.set(devs[0])
+        # Keep the current selection if it's still valid; otherwise choose first
+        cur = self.wifi_device.get().strip()
+        if devs:
+            if cur in devs:
+                # Do not overwrite user selection
+                pass
+            else:
+                self.wifi_device.set(devs[0])
 
     def _update_pwless_status(self) -> None:
         ok = self._check_passwordless()
@@ -924,14 +1086,68 @@ class App:
         except Exception as exc:
             self._append("AUTO", f"Failed to run setup: {exc}")
 
+    def fix_wifi_profile(self) -> None:
+        """Clear interface-name bindings on Wi‑Fi profiles and try reconnect.
+
+        This fixes cases where a profile is pinned to the wrong interface
+        (e.g., eth0) and prevents reconnection.
+        """
+        self._append("AUTO", "Fixing Wi‑Fi profile interface bindings…")
+        # Get all Wi‑Fi connections
+        rc, txt = self._run_and_capture(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"], "AUTO")
+        wifi_names: list[str] = []
+        if rc == 0:
+            for line in txt.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 2 and parts[1].strip().lower() in ("wifi", "802-11-wireless"):
+                    wifi_names.append(parts[0])
+        changed = 0
+        for name in wifi_names:
+            rc, out = self._run_and_capture(["nmcli", "-g", "connection.interface-name", "connection", "show", "id", name], "AUTO")
+            iface = (out or "").strip()
+            if iface:
+                self._append("AUTO", f"Clearing interface-name '{iface}' on '{name}'")
+                self._run_cmd(["nmcli", "connection", "modify", "id", name, "connection.interface-name", ""], "AUTO")
+                changed += 1
+        if changed == 0:
+            self._append("AUTO", "No Wi‑Fi profiles required changes.")
+        # Attempt to reconnect previous Wi‑Fi connections
+        self._reconnect_previous_connections()
+
     def _check_passwordless(self) -> bool:
-        # Try a harmless allowed command via sudo -n; if it succeeds, we’re good
-        candidates = ["/usr/sbin/rfkill", "/usr/bin/mount", "/usr/sbin/iw"]
-        for path in candidates:
-            if Path(path).exists():
-                rc = self._run_cmd([path, "--help"], "AUTO", privileged=True)
-                if rc == 0:
+        """Return True if `sudo -n` works for at least our needed commands.
+
+        Some systems only allow a curated set of commands via sudoers. Prefer a
+        generic `sudo -n true`, but if that fails, probe a shortlist of
+        frequently used commands (rfkill, modprobe, iw, ip, systemctl, nmcli).
+        """
+        try:
+            if shutil.which("sudo"):
+                # Generic check
+                proc = subprocess.run(["sudo", "-n", "true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                if proc.returncode == 0:
                     return True
+                # Targeted probes
+                candidates = [
+                    ["rfkill", "--help"],
+                    ["modprobe", "-h"],
+                    ["iw", "--help"],
+                    ["ip", "-V"],
+                    ["systemctl", "--version"],
+                    ["nmcli", "--help"],
+                ]
+                for cmd in candidates:
+                    path = shutil.which(cmd[0])
+                    if not path:
+                        continue
+                    try:
+                        p = subprocess.run(["sudo", "-n", path] + cmd[1:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                        if p.returncode == 0:
+                            return True
+                    except Exception:
+                        continue
+        except Exception:
+            pass
         return False
 
     def _start_capture_with_fallback(self) -> bool:
