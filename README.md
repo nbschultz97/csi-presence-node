@@ -58,6 +58,31 @@ Baseline amplitudes for an empty room improve stability:
 python -m csi_node.baseline --duration 60
 ```
 
+## Capabilities and limits
+
+- Presence: detects motion-induced changes in Wi‑Fi channels using CSI variance
+  and PCA. It will respond strongly to a moving person, but also to moving
+  objects (e.g., doors, fans). It does not classify “human vs object”. When a
+  person becomes completely still, presence confidence will fall over time.
+- Direction: coarse left/center/right based on the difference between the two
+  antenna chains’ average RSSI. This is a relative left/right cue, not an
+  absolute angle.
+- Distance: ballpark estimate from average RSSI using a log‑distance model.
+  Requires calibration for your room to be meaningful. It is not centimeter‑
+  accurate ranging, but a rough “nearer/farther” indicator.
+- Through‑wall: Wi‑Fi penetrates most interior walls; presence and coarse
+  direction typically still work through one wall, but confidence and distance
+  accuracy degrade. Prefer 2.4 GHz (e.g., channel 1, 20 MHz) for better
+  penetration. Results depend on construction and interference.
+- Multiple people: the current demo is single‑target. Multiple movers will
+  produce a combined response; it cannot count people or track them
+  independently.
+- Confidence: an exponential moving average (EMA) of the binary presence signal
+  (0/1). It is a stability score, not a calibrated probability.
+
+For safety‑critical or security use, additional sensing and validation are
+recommended. This repo is a demo/prototype.
+
 ### Direction and distance notes
 
 - Direction is inferred from per‑chain RSSI delta. In file/"Dat mode", the
@@ -87,6 +112,66 @@ python -m csi_node.calibrate \
 
 The pipeline reads `tx_power_dbm` and `path_loss_exponent` from
 `csi_node/config.yaml` to map RSSI to meters.
+
+### Calibration pipeline explained
+
+Calibration here is not “training a model” — it sets two parameters for the
+RSSI→distance curve and optionally establishes a static CSI baseline:
+
+- Baseline: `python -m csi_node.baseline --duration 60` records empty‑room
+  CSI to subtract static structure. Improves presence stability.
+- Distance calibration: `python -m csi_node.calibrate` (also available from
+  the GUI Tools menu) computes:
+  - `path_loss_exponent` n from two positions at distances d1, d2
+  - `tx_power_dbm` (expected RSSI at 1 m)
+  These are written into `csi_node/config.yaml`. Re‑running calibration updates
+  the parameters; it does not accumulate a dataset.
+
+You can also “replay” saved logs via the GUI (Replay mode) or CLI to validate
+changes. Replay does not change calibration by itself — only the calibrator
+script writes new parameters.
+
+### Thresholds guide
+
+Most behavior is controlled by a few intuitive thresholds (editable from the
+GUI: Tools → “Edit Thresholds…”):
+
+- `variance_threshold` (default 5.0): motion sensitivity from raw CSI
+  amplitude variance. Increase to reduce false positives; decrease to catch
+  subtler motion.
+- `pca_threshold` (default 1.0): motion sensitivity from the first PCA
+  component; complements variance. Increase to be stricter.
+- `rssi_delta` (default 2.0 dB): direction sensitivity. Larger values make
+  left/right decisions fewer and more stable; smaller values make the system
+  switch sides more readily.
+- `tx_power_dbm` and `path_loss_exponent`: set by the calibration helper.
+  These control the mapping from RSSI to meters.
+- `dat_rssi_offset` (GUI field “RSSI offset”): shifts the derived RSSI scale in
+  Dat mode so numbers look dBm‑ish. It does not affect relative direction but
+  does affect distance unless you calibrate; after calibration, this offset is
+  less important.
+- `window_size` / `window_hop`: temporal smoothing vs. responsiveness. Larger
+  windows are stabler; smaller windows respond faster.
+
+Recommended starting points for through‑wall demos:
+
+- Channel: 1 (2.412 GHz), Width: 20 MHz — better penetration, less DFS.
+- Run baseline with no people moving.
+- Calibrate distance once at ~1 m and ~3 m on your demo path.
+- If direction flickers, raise `rssi_delta` to ~3–4 dB.
+- If presence is too jumpy, raise `variance_threshold` slightly (e.g., +1).
+
+### Typical demo flow (GUI)
+
+1) Open the GUI. In Live Settings, check “Dat mode”. Set “RSSI offset” ≈ −60.
+2) Tools → “Edit Thresholds…” if you want to pre‑tune `rssi_delta` or others.
+3) Click Start. Verify presence toggles with motion and left/right flips as you
+   move.
+4) Tools → “Calibrate Distance…”: select two short logs at 1 m and 3 m,
+   enter distances, and apply. Distance numbers will be more meaningful.
+5) For through‑wall, set Channel 1 / Width 20 MHz and place the device so it
+   receives traffic passing through the wall; repeat calibration if the setting
+   changes.
 
 ## GUI launcher
 
