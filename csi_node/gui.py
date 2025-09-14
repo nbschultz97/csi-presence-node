@@ -19,7 +19,7 @@ import threading
 import queue
 import subprocess
 from pathlib import Path
-from tkinter import Tk, StringVar, IntVar, DoubleVar, BooleanVar, END, Menu, simpledialog
+from tkinter import Tk, StringVar, IntVar, DoubleVar, BooleanVar, END, Menu, simpledialog, Toplevel
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 import shutil
@@ -110,8 +110,14 @@ class App:
         self.output_file = StringVar(value=str(Path(cfg.get("output_file", "data/presence_log.jsonl"))))
         self.autoscroll = BooleanVar(value=True)
         self.pwless_status = StringVar(value="Passwordless: unknown")
+        self.calib_status = StringVar(value="Calibrated: unknown")
         # Dat-mode RSSI offset to align derived RSSI to dBm-like scale
         self.dat_rssi_offset = DoubleVar(value=float(cfg.get("dat_rssi_offset", -60.0)))
+        # Optional window override (e.g., Through‑Wall preset)
+        self._window_override: float | None = None
+        # Tracking window state
+        self._tracking_win: Toplevel | None = None
+        self._last_entry: dict | None = None
 
         self.cap_plog: ProcessLogger | None = None
         self.conv_plog: ProcessLogger | None = None
@@ -137,6 +143,9 @@ class App:
         tools.add_separator()
         tools.add_command(label="Calibrate Distance…", command=self.calibrate_distance)
         tools.add_command(label="Edit Thresholds…", command=self.edit_thresholds)
+        tools.add_command(label="Through‑Wall Preset", command=self.apply_through_wall_preset)
+        tools.add_separator()
+        tools.add_command(label="Show Tracking Window", command=self.show_tracking_window)
         menubar.add_cascade(label="Tools", menu=tools)
         self.root.config(menu=menubar)
 
@@ -196,6 +205,7 @@ class App:
         ttk.Button(ctrl, text="Save Log…", command=self._save_log).grid(row=0, column=5, padx=6)
         ttk.Button(ctrl, text="Clear", command=self._clear_log).grid(row=0, column=6, padx=6)
         ttk.Label(ctrl, textvariable=self.pwless_status).grid(row=0, column=7, padx=12)
+        ttk.Label(ctrl, textvariable=self.calib_status).grid(row=0, column=8, padx=12)
 
         # Log output
         log_frame = ttk.LabelFrame(self.root, text="Log")
@@ -220,6 +230,7 @@ class App:
         # Populate and check states
         self._populate_wifi_devices()
         self._update_pwless_status()
+        self._update_calibration_status()
 
     def _append(self, tag: str, line: str) -> None:
         self.log.insert(END, f"[{tag}] {line}\n")
@@ -295,6 +306,15 @@ class App:
             while True:
                 name, line = self.out_q.get_nowait()
                 self._append(name, line)
+                # Try to parse pipeline JSON lines and update tracking
+                if name == "PIPE" and line.startswith("{") and "\"presence\"" in line:
+                    try:
+                        import json as _json
+                        obj = _json.loads(line)
+                        self._last_entry = obj
+                        self._update_tracking_window(obj)
+                    except Exception:
+                        pass
         except queue.Empty:
             pass
         self.root.after(100, self._schedule_pump)
@@ -332,6 +352,8 @@ class App:
                     return
                 # Start pipeline to tail file (unprivileged)
                 pipe_cmd = [sys.executable, str(REPO_ROOT / "run.py"), "--out", out]
+                if self._window_override:
+                    pipe_cmd += ["--window", str(self._window_override)]
                 if pose_flag:
                     pipe_cmd.append(pose_flag)
                 self._append("PIPE", f"Starting pipeline (file): {' '.join(pipe_cmd)}")
@@ -1156,6 +1178,8 @@ class App:
             with open(DEFAULT_CFG, "w") as f:
                 yaml.safe_dump(cfg, f, sort_keys=False)
             self._append("INFO", f"Updated config: {', '.join(f'{k}={v}' for k,v in updates.items())}")
+            # Refresh calibration label if toggled
+            self._update_calibration_status()
         except Exception as exc:
             messagebox.showerror("Edit Thresholds", f"Failed to write config: {exc}")
 
@@ -1185,10 +1209,90 @@ class App:
                 self._append("CAL", line)
             if proc.returncode == 0:
                 self._append("CAL", "Calibration complete and written to config.")
+                self._update_calibration_status()
             else:
                 self._append("CAL", f"Calibration exited with code {proc.returncode}")
         except Exception as exc:
             messagebox.showerror("Calibrate Distance", f"Failed to run calibrator: {exc}")
+
+    def _update_calibration_status(self) -> None:
+        if not yaml or not DEFAULT_CFG.exists():
+            self.calib_status.set("Calibrated: unknown")
+            return
+        try:
+            cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
+            calib = bool(cfg.get("calibrated", False))
+            when = cfg.get("calibrated_at", "")
+            self.calib_status.set(f"Calibrated: {'yes' if calib else 'no'} {when}")
+        except Exception:
+            self.calib_status.set("Calibrated: unknown")
+
+    def apply_through_wall_preset(self) -> None:
+        """Set parameters suited for through-wall demos."""
+        try:
+            # UI controls
+            self.channel.set(1)
+            self.width.set(20)
+            self.dat_mode.set(True)
+            self.dat_rssi_offset.set(-60.0)
+            # Window override for steadier output
+            self._window_override = 2.5
+            # Persist rssi_delta in config for direction stability
+            if yaml and DEFAULT_CFG.exists():
+                cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
+                cfg["rssi_delta"] = 3.5
+                with open(DEFAULT_CFG, "w") as f:
+                    yaml.safe_dump(cfg, f, sort_keys=False)
+            self._append("INFO", "Applied Through‑Wall preset: ch1/20MHz, RSSI offset −60, rssi_delta=3.5, window=2.5s")
+        except Exception as exc:
+            self._append("INFO", f"Failed to apply preset: {exc}")
+
+    def show_tracking_window(self) -> None:
+        if self._tracking_win and self._tracking_win.winfo_exists():
+            try:
+                self._tracking_win.lift()
+                return
+            except Exception:
+                pass
+        win = Toplevel(self.root)
+        win.title("Live Tracking")
+        win.geometry("360x200")
+        container = ttk.Frame(win)
+        container.pack(fill="both", expand=True, padx=12, pady=12)
+        self._trk_presence = StringVar(value="Presence: —")
+        self._trk_direction = StringVar(value="Direction: —")
+        self._trk_distance = StringVar(value="Distance: — m")
+        self._trk_conf = StringVar(value="Confidence: —")
+        ttk.Label(container, textvariable=self._trk_presence, font=("TkDefaultFont", 14, "bold")).pack(anchor="w", pady=4)
+        ttk.Label(container, textvariable=self._trk_direction, font=("TkDefaultFont", 12)).pack(anchor="w", pady=4)
+        ttk.Label(container, textvariable=self._trk_distance, font=("TkDefaultFont", 12)).pack(anchor="w", pady=4)
+        ttk.Label(container, textvariable=self._trk_conf, font=("TkDefaultFont", 12)).pack(anchor="w", pady=4)
+        self._tracking_win = win
+        if self._last_entry:
+            self._update_tracking_window(self._last_entry)
+
+    def _update_tracking_window(self, obj: dict) -> None:
+        try:
+            if not (self._tracking_win and self._tracking_win.winfo_exists()):
+                return
+        except Exception:
+            return
+        pres = bool(obj.get("presence"))
+        dirn = obj.get("direction", "?")
+        dist = obj.get("distance_m", float("nan"))
+        conf = obj.get("confidence", float("nan"))
+        self._trk_presence.set(f"Presence: {'YES' if pres else 'NO'}")
+        self._trk_direction.set(f"Direction: {dirn}")
+        try:
+            dtxt = f"{float(dist):.2f} m" if dist == dist else "—"
+        except Exception:
+            dtxt = "—"
+        self._trk_distance.set(f"Distance: {dtxt}")
+        try:
+            ctxt = f"{float(conf):.2f}"
+        except Exception:
+            ctxt = "—"
+        self._trk_conf.set(f"Confidence: {ctxt}")
 
     def _check_passwordless(self) -> bool:
         """Return True if `sudo -n` works for at least our needed commands.
