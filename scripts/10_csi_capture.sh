@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-FEITCSI_BIN=${FEITCSI_BIN:-feitcsi}
+FEITCSI_BIN=${FEITCSI_BIN:-/usr/local/bin/feitcsi}
 
 echo "FEITCSI_BIN is set to '$FEITCSI_BIN'"
 
@@ -37,41 +37,46 @@ CHANNEL=${1:-36}
 WIDTH=${2:-80}
 CODING=${3:-${FEITCSI_CODING:-BCC}}
 CODING=${CODING^^}
-LOG=./data/csi_raw.log
-STDLOG=./data/feitcsi.log
 
-mkdir -p ./data
+DATA_DIR=./data
+DAT=$DATA_DIR/csi_raw.dat
+JSONL=$DATA_DIR/csi_raw.log
+STDLOG=$DATA_DIR/feitcsi.log
 
-# JSON output is disabled by default. Set FEITCSI_JSON=1 to force if your
-# binary supports it. We do not auto-detect to avoid false positives.
-JSON_FLAGS=()
-if [[ "${FEITCSI_JSON:-}" == "1" ]]; then
-  JSON_FLAGS=(--json)
-fi
+mkdir -p "$DATA_DIR"
 
 freq=$(channel_to_freq "$CHANNEL")
-if [[ ${#JSON_FLAGS[@]} -gt 0 ]]; then
-  echo "Starting FeitCSI capture on channel $CHANNEL (${freq} MHz) width $WIDTH MHz coding $CODING (JSON enabled)" | tee -a "$STDLOG"
-else
-  echo "Starting FeitCSI capture on channel $CHANNEL (${freq} MHz) width $WIDTH MHz coding $CODING" | tee -a "$STDLOG"
+echo "Starting FeitCSI capture on channel $CHANNEL (${freq} MHz) width $WIDTH MHz coding $CODING → $DAT" | tee -a "$STDLOG"
+
+# Hint if permissions are likely to fail
+if [[ ! -r /sys/kernel/debug/iwlwifi && ! -L /sys/kernel/debug/iwlwifi ]]; then
+  echo "[warn] /sys/kernel/debug/iwlwifi not readable; run scripts/preflight_root.sh with sudo/pkexec" | tee -a "$STDLOG"
 fi
 
-tmp_err=$(mktemp)
-(
-  "$FEITCSI_BIN" -f "$freq" -w "$WIDTH" --coding "$CODING" "${JSON_FLAGS[@]}" -o "$LOG" \
-    2> >(tee "$tmp_err" | tee -a "$STDLOG" >&2) | tee -a "$STDLOG"
-) &
-feitcsi_pid=$!
+# Start FeitCSI writing .dat (may require sudo/pkexec). Pipe stderr to log.
+set +e
+"$FEITCSI_BIN" -f "$freq" -w "$WIDTH" --coding "$CODING" -o "$DAT" 2>>"$STDLOG" &
+FEIT_PID=$!
+set -e
 
-sleep 1
-if [[ ! -s "$LOG" ]]; then
-  echo "FeitCSI failed to produce $LOG" >&2
-  cat "$tmp_err" >&2 || true
-  kill "$feitcsi_pid" 2>/dev/null || true
-  wait "$feitcsi_pid" 2>/dev/null || true
-  rm -f "$tmp_err"
+# Wait for .dat to appear and be non-empty
+for i in {1..24}; do
+  if [[ -s "$DAT" ]]; then
+    break
+  fi
+  sleep 0.5
+done
+if [[ ! -s "$DAT" ]]; then
+  echo "[error] $DAT not created or still empty; FeitCSI may require root. Try: sudo bash scripts/preflight_root.sh, then rerun this script with sudo." | tee -a "$STDLOG" >&2
   exit 1
 fi
 
-rm -f "$tmp_err"
-wait "$feitcsi_pid"
+echo "Converting $DAT → $JSONL (streaming)" | tee -a "$STDLOG"
+python3 "$(dirname "$0")/dat2json_stream.py" --in "$DAT" --out "$JSONL" &
+CONV_PID=$!
+
+echo "Press Ctrl+C to stop. Logs: $STDLOG"
+trap 'kill $FEIT_PID $CONV_PID 2>/dev/null || true; wait $FEIT_PID $CONV_PID 2>/dev/null || true' INT TERM
+wait $FEIT_PID
+kill $CONV_PID 2>/dev/null || true
+wait $CONV_PID 2>/dev/null || true

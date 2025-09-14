@@ -20,7 +20,7 @@ resolve() {
     # Fallback to common locations
     case "$cmd" in
       rfkill|modprobe|setcap|iw|ip) echo "/usr/sbin/$cmd" ;;
-      systemctl|mount|ln) echo "/usr/bin/$cmd" ;;
+      systemctl|mount|ln|nmcli) echo "/usr/bin/$cmd" ;;
       *) echo "$cmd" ;;
     esac
   fi
@@ -34,9 +34,10 @@ IP=$(resolve ip)
 SYSTEMCTL=$(resolve systemctl)
 MOUNT=$(resolve mount)
 LN=$(resolve ln)
+NMCLI=$(resolve nmcli)
 FEITCSI=${FEITCSI_BIN:-/usr/local/bin/feitcsi}
 
-CONTENT="${USER_NAME} ALL=(root) NOPASSWD: ${RFKILL}, ${MODPROBE}, ${SETCAP}, ${IW}, ${IP}, ${SYSTEMCTL}, ${MOUNT}, ${LN}, ${FEITCSI}"
+CONTENT="${USER_NAME} ALL=(root) NOPASSWD: ${RFKILL}, ${MODPROBE}, ${SETCAP}, ${IW}, ${IP}, ${SYSTEMCTL}, ${MOUNT}, ${LN}, ${NMCLI}, ${FEITCSI}"
 
 # Must be root to write sudoers; if not, re-exec via pkexec or sudo
 if [[ $EUID -ne 0 ]]; then
