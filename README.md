@@ -58,6 +58,36 @@ Baseline amplitudes for an empty room improve stability:
 python -m csi_node.baseline --duration 60
 ```
 
+### Direction and distance notes
+
+- Direction is inferred from per‑chain RSSI delta. In file/"Dat mode", the
+  converter now estimates RSSI per chain from CSI magnitudes so direction works
+  without the live extractor.
+- Distance uses a crude log‑distance model driven by average RSSI; tune it for
+  your room via calibration below.
+
+#### Calibrate distance (tx_power, path loss exponent)
+
+Collect two short CSI logs at known distances (e.g., 1.0 m and 3.0 m):
+
+```bash
+# Start capture (Dat mode creates data/csi_raw.log with rssi values)
+./scripts/10_csi_capture.sh &
+sleep 8; cp data/csi_raw.log data/csi_raw_d1.log  # at distance d1
+# Move to distance d2, wait a few seconds
+sleep 8; cp data/csi_raw.log data/csi_raw_d2.log  # at distance d2
+kill %1 || true
+
+# Estimate parameters and write them to config
+python -m csi_node.calibrate \
+  --log1 data/csi_raw_d1.log --d1 1.0 \
+  --log2 data/csi_raw_d2.log --d2 3.0 \
+  --config csi_node/config.yaml
+```
+
+The pipeline reads `tx_power_dbm` and `path_loss_exponent` from
+`csi_node/config.yaml` to map RSSI to meters.
+
 ## GUI launcher
 
 A minimal Tk GUI is included to start/stop capture and replay without the

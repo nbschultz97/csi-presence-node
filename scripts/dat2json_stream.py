@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import math
 import os
 import struct
 import sys
@@ -53,6 +54,29 @@ def parse_frame(field: bytes):
     return [ch0, ch1]
 
 
+def _rssi_from_csi(csi2x56):
+    """Compute per-chain relative RSSI (dB) from 2x56 magnitudes.
+
+    Uses 20*log10(RMS amplitude) per chain. Absolute scale is arbitrary; use the
+    calibration utility to align distance estimates for your environment.
+    """
+    try:
+        ch0, ch1 = csi2x56
+        # RMS amplitude per chain
+        eps = 1e-12
+        def rms(vals):
+            return math.sqrt(sum(v * v for v in vals) / max(len(vals), 1))
+        a0 = rms(ch0)
+        a1 = rms(ch1)
+        rssi0 = 20.0 * math.log10(max(a0, eps))
+        rssi1 = 20.0 * math.log10(max(a1, eps))
+        # Optional global offset to shift into a dBm-like range
+        off = float(os.environ.get("DAT_RSSI_OFFSET", "0"))
+        return [rssi0 + off, rssi1 + off]
+    except Exception:
+        return [-40.0, -40.0]
+
+
 def stream(in_path: str, out_path: str):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     # Wait for input file to appear
@@ -80,7 +104,7 @@ def stream(in_path: str, out_path: str):
                 continue
             pkt = {
                 'ts': time.time(),
-                'rssi': [-40.0, -40.0],  # placeholder; direction defaults to center
+                'rssi': _rssi_from_csi(csi),
                 'csi': csi,
             }
             f_out.write(json.dumps(pkt) + '\n')
