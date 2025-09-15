@@ -141,6 +141,8 @@ class App:
         tools.add_command(label="Setup Passwordless sudo…", command=self.setup_passwordless)
         tools.add_command(label="Fix Wi‑Fi Profile…", command=self.fix_wifi_profile)
         tools.add_separator()
+        tools.add_command(label="Capture Baseline (60s)", command=self.capture_baseline)
+        tools.add_separator()
         tools.add_command(label="Calibrate Distance…", command=self.calibrate_distance)
         tools.add_command(label="Edit Thresholds…", command=self.edit_thresholds)
         tools.add_command(label="Through‑Wall Preset", command=self.apply_through_wall_preset)
@@ -1228,6 +1230,42 @@ class App:
             self.calib_status.set(f"Calibrated: {'yes' if calib else 'no'} {when}")
         except Exception:
             self.calib_status.set("Calibrated: unknown")
+
+    def capture_baseline(self) -> None:
+        """Capture a 60-second empty-room baseline and save to baseline_file."""
+        try:
+            # Load baseline path from config or default
+            out_path = REPO_ROOT / "data" / "baseline.npz"
+            if yaml and DEFAULT_CFG.exists():
+                try:
+                    cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
+                    bpath = cfg.get("baseline_file")
+                    if bpath:
+                        out_path = REPO_ROOT / Path(bpath)
+                except Exception:
+                    pass
+            # Log path used by Dat mode and the pipeline
+            log_path = REPO_ROOT / "data" / "csi_raw.log"
+            cmd = [
+                sys.executable, "-m", "csi_node.baseline",
+                "--log", str(log_path),
+                "--duration", "60",
+                "--out", str(out_path),
+                "--wait", "10.0",
+            ]
+            self._append("BASE", f"Capturing baseline for 60s → {out_path}")
+            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out, err = proc.communicate()
+            for line in (out or "").splitlines():
+                self._append("BASE", line)
+            for line in (err or "").splitlines():
+                self._append("BASE", line)
+            if proc.returncode == 0:
+                self._append("BASE", "Baseline capture complete.")
+            else:
+                self._append("BASE", f"Baseline capture exited with code {proc.returncode}")
+        except Exception as exc:
+            self._append("BASE", f"Baseline capture failed: {exc}")
 
     def apply_through_wall_preset(self) -> None:
         """Set parameters suited for through-wall demos."""
