@@ -146,6 +146,7 @@ class App:
         tools.add_command(label="Through‑Wall Preset", command=self.apply_through_wall_preset)
         tools.add_separator()
         tools.add_command(label="Show Tracking Window", command=self.show_tracking_window)
+        tools.add_command(label="Instructions", command=self.open_instructions)
         menubar.add_cascade(label="Tools", menu=tools)
         self.root.config(menu=menubar)
 
@@ -204,6 +205,7 @@ class App:
         ttk.Button(ctrl, text="Copy All", command=self._copy_all).grid(row=0, column=4, padx=6)
         ttk.Button(ctrl, text="Save Log…", command=self._save_log).grid(row=0, column=5, padx=6)
         ttk.Button(ctrl, text="Clear", command=self._clear_log).grid(row=0, column=6, padx=6)
+        ttk.Button(ctrl, text="Instructions", command=self.open_instructions).grid(row=0, column=9, padx=12)
         ttk.Label(ctrl, textvariable=self.pwless_status).grid(row=0, column=7, padx=12)
         ttk.Label(ctrl, textvariable=self.calib_status).grid(row=0, column=8, padx=12)
 
@@ -1293,6 +1295,29 @@ class App:
         except Exception:
             ctxt = "—"
         self._trk_conf.set(f"Confidence: {ctxt}")
+
+    def open_instructions(self) -> None:
+        """Open README (instructions) in the system viewer; fallback to a popup."""
+        readme = REPO_ROOT / "README.md"
+        # Try to open with xdg-open
+        try:
+            if readme.exists():
+                subprocess.Popen(["xdg-open", str(readme)])
+                return
+        except Exception:
+            pass
+        # Fallback: show a simple popup with the text
+        try:
+            text = readme.read_text() if readme.exists() else "Instructions not found."
+        except Exception as exc:
+            text = f"Failed to load README: {exc}"
+        win = Toplevel(self.root)
+        win.title("Instructions")
+        win.geometry("760x520")
+        area = ScrolledText(win, wrap="word")
+        area.pack(fill="both", expand=True)
+        area.insert("1.0", text)
+        area.configure(state="disabled")
 
     def _check_passwordless(self) -> bool:
         """Return True if `sudo -n` works for at least our needed commands.
