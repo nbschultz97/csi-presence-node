@@ -77,7 +77,7 @@ def _rssi_from_csi(csi2x56):
         return [-40.0, -40.0]
 
 
-def stream(in_path: str, out_path: str):
+def stream(in_path: str, out_path: str, out2_path: str | None = None):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     # Wait for input file to appear
     start = time.time()
@@ -88,6 +88,13 @@ def stream(in_path: str, out_path: str):
             sys.exit(2)
     # Open input for reading; don't seek to end so we catch frames from start
     with open(in_path, 'rb') as f_in, open(out_path, 'a', buffering=1) as f_out:
+        f_out2 = None
+        if out2_path:
+            try:
+                os.makedirs(os.path.dirname(out2_path), exist_ok=True)
+                f_out2 = open(out2_path, 'a', buffering=1)
+            except Exception:
+                f_out2 = None
         while True:
             # Read 2-byte length prefix if available
             hdr = try_read(f_in, 2)
@@ -107,15 +114,22 @@ def stream(in_path: str, out_path: str):
                 'rssi': _rssi_from_csi(csi),
                 'csi': csi,
             }
-            f_out.write(json.dumps(pkt) + '\n')
+            line = json.dumps(pkt) + '\n'
+            f_out.write(line)
+            if f_out2:
+                try:
+                    f_out2.write(line)
+                except Exception:
+                    pass
 
 
 def main():
     ap = argparse.ArgumentParser(description='Stream FeitCSI .dat to JSONL')
     ap.add_argument('--in', dest='in_path', required=True, help='input .dat path')
     ap.add_argument('--out', dest='out_path', required=True, help='output .log path (JSONL)')
+    ap.add_argument('--out2', dest='out2_path', default=None, help='optional second .log path (JSONL)')
     args = ap.parse_args()
-    stream(args.in_path, args.out_path)
+    stream(args.in_path, args.out_path, args.out2_path)
 
 
 if __name__ == '__main__':

@@ -111,6 +111,7 @@ class App:
         self.autoscroll = BooleanVar(value=True)
         self.pwless_status = StringVar(value="Passwordless: unknown")
         self.calib_status = StringVar(value="Calibrated: unknown")
+        self.baseline_status = StringVar(value="Baseline: unknown")
         # Dat-mode RSSI offset to align derived RSSI to dBm-like scale
         self.dat_rssi_offset = DoubleVar(value=float(cfg.get("dat_rssi_offset", -60.0)))
         # Optional window override (e.g., Through‑Wall preset)
@@ -210,6 +211,7 @@ class App:
         ttk.Button(ctrl, text="Instructions", command=self.open_instructions).grid(row=0, column=9, padx=12)
         ttk.Label(ctrl, textvariable=self.pwless_status).grid(row=0, column=7, padx=12)
         ttk.Label(ctrl, textvariable=self.calib_status).grid(row=0, column=8, padx=12)
+        ttk.Label(ctrl, textvariable=self.baseline_status).grid(row=1, column=8, padx=12, sticky="w")
 
         # Log output
         log_frame = ttk.LabelFrame(self.root, text="Log")
@@ -235,6 +237,7 @@ class App:
         self._populate_wifi_devices()
         self._update_pwless_status()
         self._update_calibration_status()
+        self._update_baseline_status()
 
     def _append(self, tag: str, line: str) -> None:
         self.log.insert(END, f"[{tag}] {line}\n")
@@ -350,12 +353,20 @@ class App:
                     self.stop()
                     return
                 # Wait until log file exists and is non-empty
-                if not self._wait_for_file(REPO_ROOT / "data" / "csi_raw.log", 10.0):
+                if not (self._current_jsonl_path and self._wait_for_file(self._current_jsonl_path, 10.0)):
                     self._append("FEIT", "Log not created after capture start; aborting.")
                     self.stop()
                     return
                 # Start pipeline to tail file (unprivileged)
-                pipe_cmd = [sys.executable, str(REPO_ROOT / "run.py"), "--out", out]
+                out = self.output_file.get()
+                pipe_cmd = [
+                    sys.executable,
+                    str(REPO_ROOT / "run.py"),
+                    "--out",
+                    out,
+                ]
+                if self._current_jsonl_path:
+                    pipe_cmd += ["--log", str(self._current_jsonl_path)]
                 if self._window_override:
                     pipe_cmd += ["--window", str(self._window_override)]
                 if pose_flag:
@@ -557,8 +568,20 @@ class App:
 
         ch = int(self.channel.get())
         requested = int(self.width.get()) if self.width.get() > 0 else 20
-        dat_path = DATA_DIR / "csi_raw.dat"
-        jsonl_path = DATA_DIR / "csi_raw.log"
+        # Create a new session directory and set paths
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        session_dir = DATA_DIR / "sessions" / ts
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        dat_path = DATA_DIR / "csi_raw.dat"  # keep default for tooling
+        jsonl_path = DATA_DIR / "csi_raw.log"  # default path the pipeline tails
+        session_jsonl = session_dir / "csi_raw.log"
+        # Update current session state and set presence output path
+        self._session_dir = session_dir
+        self._current_jsonl_path = jsonl_path
+        self.output_file.set(str(session_dir / "presence_log.jsonl"))
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             for p in (dat_path, jsonl_path):
@@ -639,12 +662,29 @@ class App:
                 return False
 
         # Start converter
-        conv = [sys.executable, str(REPO_ROOT / "scripts" / "dat2json_stream.py"), "--in", str(dat_path), "--out", str(jsonl_path)]
+        conv = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "dat2json_stream.py"),
+            "--in",
+            str(dat_path),
+            "--out",
+            str(jsonl_path),
+            "--out2",
+            str(session_jsonl),
+        ]
         self._append("CONV", f"Starting converter: {' '.join(conv)}")
         try:
             env = os.environ.copy()
             env["DAT_RSSI_OFFSET"] = str(self.dat_rssi_offset.get())
-            cproc = subprocess.Popen(conv, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
+            cproc = subprocess.Popen(
+                conv,
+                cwd=str(REPO_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
             self.conv_plog = ProcessLogger("CONV", cproc, self.out_q)
             self.conv_plog.start()
         except Exception as exc:
@@ -1231,21 +1271,46 @@ class App:
         except Exception:
             self.calib_status.set("Calibrated: unknown")
 
+    def _update_baseline_status(self) -> None:
+        if not yaml or not DEFAULT_CFG.exists():
+            self.baseline_status.set("Baseline: unknown")
+            return
+        try:
+            cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
+            bpath = cfg.get("baseline_file", "")
+            exists = bool(bpath) and (REPO_ROOT / Path(bpath)).exists()
+            self.baseline_status.set(f"Baseline: {'yes' if exists else 'no'}")
+        except Exception:
+            self.baseline_status.set("Baseline: unknown")
+
     def capture_baseline(self) -> None:
         """Capture a 60-second empty-room baseline and save to baseline_file."""
         try:
-            # Load baseline path from config or default
-            out_path = REPO_ROOT / "data" / "baseline.npz"
-            if yaml and DEFAULT_CFG.exists():
-                try:
-                    cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
-                    bpath = cfg.get("baseline_file")
-                    if bpath:
-                        out_path = REPO_ROOT / Path(bpath)
-                except Exception:
-                    pass
-            # Log path used by Dat mode and the pipeline
-            log_path = REPO_ROOT / "data" / "csi_raw.log"
+            # Use default JSON log unless overridden by current capture state
+            log_path = self._current_jsonl_path or (REPO_ROOT / "data" / "csi_raw.log")
+            # Ensure live capture is running and log is fresh
+            now = time.time()
+            try:
+                fresh = log_path.exists() and (now - log_path.stat().st_mtime) < 5.0 and log_path.stat().st_size > 0
+            except Exception:
+                fresh = False
+            if not fresh:
+                self._append("BASE", "Starting capture for baseline…")
+                if not self._start_dat_jsonl_capture():
+                    self._append("BASE", "Failed to start capture for baseline.")
+                    return
+                log_path = self._current_jsonl_path or (REPO_ROOT / "data" / "csi_raw.log")
+                if not (log_path and self._wait_for_file(log_path, 10.0)):
+                    self._append("BASE", "Baseline could not find an active JSON log.")
+                    return
+            # Choose timestamped baseline file
+            bdir = REPO_ROOT / "data" / "baselines"
+            try:
+                bdir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            out_path = bdir / f"baseline-{ts}.npz"
             cmd = [
                 sys.executable, "-m", "csi_node.baseline",
                 "--log", str(log_path),
@@ -1262,10 +1327,139 @@ class App:
                 self._append("BASE", line)
             if proc.returncode == 0:
                 self._append("BASE", "Baseline capture complete.")
+                # Update config to use this baseline file
+                try:
+                    cfg = yaml.safe_load(open(DEFAULT_CFG)) if (yaml and DEFAULT_CFG.exists()) else {}
+                    if cfg is None:
+                        cfg = {}
+                    cfg["baseline_file"] = str(out_path.relative_to(REPO_ROOT)) if str(out_path).startswith(str(REPO_ROOT)) else str(out_path)
+                    with open(DEFAULT_CFG, "w") as f:
+                        yaml.safe_dump(cfg, f, sort_keys=False)
+                    self._update_baseline_status()
+                except Exception:
+                    pass
+                try:
+                    messagebox.showinfo("Baseline", "Baseline capture complete and saved.")
+                except Exception:
+                    pass
             else:
                 self._append("BASE", f"Baseline capture exited with code {proc.returncode}")
         except Exception as exc:
             self._append("BASE", f"Baseline capture failed: {exc}")
+
+    def import_baseline(self) -> None:
+        path = filedialog.askopenfilename(title="Import baseline file", filetypes=[("NumPy npz", ".npz"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            cfg = yaml.safe_load(open(DEFAULT_CFG)) if (yaml and DEFAULT_CFG.exists()) else {}
+            if cfg is None:
+                cfg = {}
+            cfg["baseline_file"] = str(Path(path).relative_to(REPO_ROOT)) if str(path).startswith(str(REPO_ROOT)) else str(path)
+            with open(DEFAULT_CFG, "w") as f:
+                yaml.safe_dump(cfg, f, sort_keys=False)
+            self._update_baseline_status()
+            self._append("BASE", f"Imported baseline: {path}")
+            try:
+                messagebox.showinfo("Baseline", "Baseline imported and set.")
+            except Exception:
+                pass
+        except Exception as exc:
+            messagebox.showerror("Import Baseline", f"Failed to import: {exc}")
+
+    def calibration_wizard(self) -> None:
+        """Guide the user through two-step recording and calibration."""
+        # Ensure capture is running
+        log_path = self._current_jsonl_path or (REPO_ROOT / "data" / "csi_raw.log")
+        now = time.time()
+        try:
+            fresh = log_path.exists() and (now - log_path.stat().st_mtime) < 5.0 and log_path.stat().st_size > 0
+        except Exception:
+            fresh = False
+        if not fresh:
+            self._append("CAL", "Starting capture for calibration…")
+            if not self._start_dat_jsonl_capture():
+                self._append("CAL", "Failed to start capture for calibration.")
+                return
+            log_path = self._current_jsonl_path or (REPO_ROOT / "data" / "csi_raw.log")
+            if not (log_path and self._wait_for_file(log_path, 10.0)):
+                self._append("CAL", "Calibration could not find an active JSON log.")
+                return
+        # Prepare directory
+        cdir = REPO_ROOT / "data" / "calibration"
+        try:
+            cdir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        def record_segment(dist_m: float, seconds: float) -> Path | None:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            out = cdir / f"cal-{ts}-d{dist_m:.2f}.log"
+            self._append("CAL", f"Recording {seconds:.0f}s at d={dist_m} m → {out}")
+            try:
+                start = time.time()
+                with open(log_path, "r") as fin, open(out, "w") as fout:
+                    fin.seek(0, 2)
+                    while time.time() - start < seconds:
+                        line = fin.readline()
+                        if not line:
+                            time.sleep(0.05)
+                            continue
+                        fout.write(line)
+                        fout.flush()
+                return out
+            except Exception as exc:
+                self._append("CAL", f"Record failed: {exc}")
+                return None
+
+        # Step 1
+        d1 = simpledialog.askfloat("Calibration", "Enter distance d1 (meters)", initialvalue=1.0)
+        if not d1:
+            return
+        p1 = record_segment(d1, 12.0)
+        if not p1:
+            return
+        # Step 2
+        d2 = simpledialog.askfloat("Calibration", "Enter distance d2 (meters)", initialvalue=3.0)
+        if not d2:
+            return
+        p2 = record_segment(d2, 12.0)
+        if not p2:
+            return
+        # Run calibrator
+        cmd = [
+            sys.executable,
+            "-m",
+            "csi_node.calibrate",
+            "--log1",
+            str(p1),
+            "--d1",
+            str(d1),
+            "--log2",
+            str(p2),
+            "--d2",
+            str(d2),
+            "--config",
+            str(DEFAULT_CFG),
+        ]
+        self._append("CAL", f"Running: {' '.join(cmd)}")
+        try:
+            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out_txt, err_txt = proc.communicate()
+            for line in (out_txt or "").splitlines():
+                self._append("CAL", line)
+            for line in (err_txt or "").splitlines():
+                self._append("CAL", line)
+            if proc.returncode == 0:
+                self._update_calibration_status()
+                try:
+                    messagebox.showinfo("Calibration", "Calibration complete.")
+                except Exception:
+                    pass
+            else:
+                self._append("CAL", f"Calibration exited with code {proc.returncode}")
+        except Exception as exc:
+            messagebox.showerror("Calibration", f"Failed to run calibrator: {exc}")
 
     def apply_through_wall_preset(self) -> None:
         """Set parameters suited for through-wall demos."""

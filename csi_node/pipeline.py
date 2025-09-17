@@ -180,6 +180,7 @@ def run_demo(
     window: float = 3.0,
     out: str = "data/presence_log.jsonl",
     speed: float = 1.0,
+    log_override: str | None = None,
 ) -> None:
     """Run realtime or replay pipeline with optional pose and TUI."""
     # Load config relative to this file to avoid CWD issues
@@ -187,6 +188,8 @@ def run_demo(
     cfg = yaml.safe_load(open(cfg_path))
     cfg["window_size"] = window
     cfg["output_file"] = out
+    if log_override:
+        cfg["log_file"] = log_override
     buffer = deque()
     baseline = None
     if Path(cfg["baseline_file"]).exists():
@@ -431,6 +434,7 @@ def main() -> None:
     parser.add_argument("--window", type=float, default=3.0, help="window size (s)")
     parser.add_argument("--out", type=str, default="data/presence_log.jsonl", help="output JSONL")
     parser.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
+    parser.add_argument("--log", type=str, default=None, help="override path to input JSONL log")
     args = parser.parse_args()
 
     src = None
@@ -449,6 +453,7 @@ def main() -> None:
         window=args.window,
         out=args.out,
         speed=args.speed,
+        log_override=args.log,
     )
 
 

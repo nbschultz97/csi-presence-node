@@ -1,13 +1,15 @@
 channel: 36
 bandwidth: 80
-window_size: 1.0      # seconds
-window_hop: 0.5       # seconds
+window_size: 1.0
+window_hop: 0.5
 variance_threshold: 5.0
 pca_threshold: 1.0
-rssi_delta: 2.0       # dB
-baseline_file: ./data/baseline.npz
+rssi_delta: 3.5
+baseline_file: data/baselines/baseline-20250917-114733.npz
 log_file: ./data/csi_raw.log
 output_file: ./data/presence_log.jsonl
 rotation_max_bytes: 1048576
-tx_power_dbm: -40.0        # RSSI at 1 meter (dBm), calibrate per room
-path_loss_exponent: 2.0    # Path loss exponent n, typical indoor 1.6–3.0
+tx_power_dbm: -24.81035704265738
+path_loss_exponent: -0.0911332407886912
+calibrated: true
+calibrated_at: '2025-09-17T17:53:41Z'
