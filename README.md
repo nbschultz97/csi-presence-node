@@ -20,6 +20,20 @@ virtual environment:
 source .venv/bin/activate
 ```
 
+### First‑time setup (recommended)
+
+- Grant FeitCSI capabilities once so capture can run without sudo prompts:
+
+  sudo setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/feitcsi
+
+- If your desktop asks for passwords during capture, use the GUI’s
+  Tools → “Setup Passwordless sudo…” to add a limited sudoers entry. This lets
+  the app bring the NIC up/down, mount debugfs, and run FeitCSI without
+  blocking prompts.
+
+- If reconnection to Wi‑Fi profiles is flaky after stopping capture, use Tools
+  → “Fix Wi‑Fi Profile…” to clear stale interface bindings and reconnect.
+
 Verify the install with the bundled demo which captures for ten seconds and
 prints JSON results:
 
@@ -57,6 +71,40 @@ Baseline amplitudes for an empty room improve stability:
 ```bash
 python -m csi_node.baseline --duration 60
 ```
+
+## Demo Best Practices (through‑wall and room demos)
+
+Follow this checklist for reliable results:
+
+- Use the GUI and click Tools → “Through‑Wall Preset”. This sets 2.4 GHz
+  channel 1, 20 MHz, enables Dat mode, applies an RSSI offset, and uses a
+  steadier 2.5 s window. Direction threshold (`rssi_delta`) is raised for
+  stability.
+- Start capture in Dat mode (press “Start”) and wait until the log shows
+  “JSON log active: data/csi_raw.log”. Keep it running throughout baseline and
+  calibration.
+- Capture a baseline in an empty room:
+  - GUI: Tools → “Capture Baseline (60s)”. Keep the room still while it runs.
+  - Why: improves presence stability and reduces idle false positives by
+    subtracting the empty‑room CSI.
+- Calibrate distance in the same environment:
+  - In the GUI: Tools → “Calibrate Distance…”, supply two short logs at known
+    distances (e.g., 1.0 m and 3.0 m). The GUI writes `tx_power_dbm` and
+    `path_loss_exponent` into `csi_node/config.yaml` and shows a calibration
+    badge.
+- Use the “Live Tracking” window for audience display:
+  - Tools → “Show Tracking Window” — this shows only the latest frame
+    (presence, direction, distance, confidence) without log spam.
+- If direction flickers, raise `rssi_delta` (e.g., 3.5 → 4.5 dB). If presence
+  is too sensitive, raise `variance_threshold` and `pca_threshold` a notch.
+
+Troubleshooting quick fixes:
+- If distance looks too small or doesn’t change with motion, (re)run
+  calibration in the demo location.
+- If presence stays true when nobody moves, record a baseline (ensure capture
+  is running so the JSON log is active) and increase
+  `variance_threshold`/`pca_threshold`. A longer window (2.5–3.0 s) also helps.
+- Prefer 2.4 GHz (ch1/20 MHz) through one interior wall for stronger signals.
 
 ## Capabilities and limits
 
@@ -172,6 +220,29 @@ Recommended starting points for through‑wall demos:
 5) For through‑wall, set Channel 1 / Width 20 MHz and place the device so it
    receives traffic passing through the wall; repeat calibration if the setting
    changes.
+
+## GUI Reference
+
+- Live Settings: pick device, channel, width, and toggle Dat mode; set RSSI
+  offset (Dat mode only) and optional pose.
+- Controls: Start/Stop, Autoscroll, copy/save/clear log. A status line shows
+  passwordless sudo, calibration status, and baseline status.
+- Tools menu:
+  - Diagnostics: collects a detailed system/driver/capture log file under
+    `data/`.
+  - Setup Passwordless sudo…: guided sudoers entry for smoother capture.
+  - Fix Wi‑Fi Profile…: clears stale interface bindings then reconnects.
+  - Through‑Wall Preset: applies stable through‑wall defaults.
+  - Calibrate Distance…: estimates `tx_power_dbm` and `path_loss_exponent`
+    from two logs at known distances and writes them to the config.
+  - Calibration Wizard…: prompts for two distances and auto‑records
+    timestamped calibration segments before computing parameters.
+  - Edit Thresholds…: updates `variance_threshold`, `pca_threshold`,
+    `rssi_delta`, `tx_power_dbm`, `path_loss_exponent`, and `dat_rssi_offset`.
+  - Show Tracking Window: opens a clean live view of the latest frame.
+  - Capture Baseline (60s): records a timestamped baseline and selects it.
+  - Import Baseline…: picks an existing `baseline.npz` for use.
+  - Instructions: opens this README for quick guidance.
 
 ## GUI launcher
 

@@ -25,6 +25,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+from datetime import datetime
 from statistics import median
 from typing import Tuple, Optional
 
@@ -70,6 +71,9 @@ def write_config(cfg_path: Path, txp: float, n: float) -> None:
     data = yaml.safe_load(open(cfg_path))
     data["tx_power_dbm"] = float(txp)
     data["path_loss_exponent"] = float(n)
+    # Mark calibration metadata for UI
+    data["calibrated"] = True
+    data["calibrated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(cfg_path, "w") as f:
         yaml.safe_dump(data, f, sort_keys=False)
 
@@ -115,4 +119,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
