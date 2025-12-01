@@ -5,12 +5,17 @@ import yaml
 import sys
 import os
 import json
+import math
 from pathlib import Path
 from collections import deque
+from typing import Optional, Tuple
 import numpy as np
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from threading import Event, Thread
+
+from node.aoa import aoa_deg
+from node.range import AlphaBetaFilter, distance_from_rss
 
 from . import utils
 from . import tui as tui_mod  # curses dashboard hooks
@@ -31,6 +36,38 @@ def _capture_fail() -> None:
 def _check_log_fresh(path: Path) -> None:
     if not path.exists() or time.time() - path.stat().st_mtime > STALE_THRESHOLD:
         _capture_fail()
+
+
+def _channel_to_freq_mhz(ch: int) -> float:
+    if 1 <= ch <= 13:
+        return 2407 + ch * 5
+    if ch == 14:
+        return 2484
+    return 5000 + ch * 5
+
+
+def _center_frequency_hz(cfg: dict) -> float:
+    try:
+        ch = int(cfg.get("channel", 36))
+    except Exception:
+        ch = 36
+    return _channel_to_freq_mhz(ch) * 1e6
+
+
+def _split_rx_chains(csi) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    arr = np.asarray(csi)
+    if arr.size == 0:
+        return None, None
+    if arr.ndim >= 1 and arr.shape[-1] == 2 and not np.iscomplexobj(arr):
+        arr = arr[..., 0] + 1j * arr[..., 1]
+    arr = np.asarray(arr, dtype=np.complex128)
+    if arr.ndim <= 1:
+        return None, None
+    if arr.shape[0] >= 2:
+        return arr[0].reshape(-1), arr[1].reshape(-1)
+    if arr.shape[-1] >= 2:
+        return arr[..., 0].reshape(-1), arr[..., 1].reshape(-1)
+    return None, None
 
 
 class CSILogHandler(FileSystemEventHandler):
@@ -141,7 +178,7 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
     mean_mag = float(np.mean(abs_amps))
     std_mag = float(np.std(abs_amps))
     rssi0 = rssi1 = float("nan")
-    direction = "C"
+    diff = float("nan")
     rssis = [p.get("rssi") for p in valid if p.get("rssi")]
     if rssis and all(len(r) >= 2 for r in rssis):
         r0_vals = [r[0] for r in rssis]
@@ -149,24 +186,52 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
         rssi0 = float(np.mean(r0_vals))
         rssi1 = float(np.mean(r1_vals))
         diff = rssi0 - rssi1
-        delta = cfg["rssi_delta"]
+    avg_vals = [v for v in (rssi0, rssi1) if math.isfinite(v)]
+    avg_rssi = float(np.mean(avg_vals)) if avg_vals else float("nan")
+    txp = float(cfg.get("tx_power_dbm", -40.0))
+    ple = float(cfg.get("path_loss_exponent", 2.0))
+    intercept = float(cfg.get("path_loss_c", txp))
+    distance = distance_from_rss(avg_rssi, ple, intercept, txp)
+    spacing_cm = float(cfg.get("antenna_spacing_cm", 6.25))
+    spacing_m = spacing_cm / 100.0 if spacing_cm > 0 else 0.0
+    theta_offset = float(cfg.get("theta_offset_deg", 0.0))
+    freq_hz = _center_frequency_hz(cfg)
+    aoa_samples: list[float] = []
+    if spacing_m > 0 and freq_hz > 0:
+        for pkt in valid:
+            c1, c2 = _split_rx_chains(pkt.get("csi"))
+            if c1 is None or c2 is None:
+                continue
+            ang = aoa_deg(c1, c2, freq_hz, spacing_m, theta_offset=theta_offset)
+            if math.isfinite(ang):
+                aoa_samples.append(float(ang))
+    bearing_deg = float(np.median(aoa_samples)) if aoa_samples else float("nan")
+    aoa_deadzone = float(cfg.get("aoa_deadzone_deg", 7.5))
+    direction = "C"
+    if math.isfinite(bearing_deg):
+        if bearing_deg < -aoa_deadzone:
+            direction = "L"
+        elif bearing_deg > aoa_deadzone:
+            direction = "R"
+    elif math.isfinite(diff):
+        delta = float(cfg.get("rssi_delta", 3.5))
         if diff > delta:
             direction = "L"
         elif diff < -delta:
             direction = "R"
-    avg_rssi = (rssi0 + rssi1) / 2.0
-    txp = float(cfg.get("tx_power_dbm", -40.0))
-    ple = float(cfg.get("path_loss_exponent", 2.0))
-    distance = utils.rssi_to_distance(avg_rssi, txp, ple)
     presence = int(var > cfg["variance_threshold"] or pca1 > cfg["pca_threshold"])
     return {
         "presence": presence,
         "direction": direction,
+        "rssi_delta": diff,
         "var": var,
         "pca1": pca1,
         "rssi0": rssi0,
         "rssi1": rssi1,
         "distance": distance,
+        "distance_raw": distance,
+        "bearing_deg": bearing_deg,
+        "bearing_label": {"L": "left", "R": "right", "C": "center"}[direction],
         "pose_feat": np.array([mean_mag, std_mag]),
         "ts": end_ts,
     }
@@ -204,6 +269,11 @@ def run_demo(
         except Exception as exc:  # pragma: no cover - classifier optional
             print(f"Pose classifier init failed: {exc}", file=sys.stderr)
 
+    range_filter = AlphaBetaFilter(
+        alpha=float(cfg.get("range_alpha", 0.65)),
+        beta=float(cfg.get("range_beta", 0.15)),
+        dt=float(cfg.get("range_dt", cfg.get("window_hop", 0.5))),
+    )
     alpha = 0.2
     presence_ema = 0.0
     pose_ema = 0.0
@@ -214,7 +284,11 @@ def run_demo(
         "presence": "NO",
         "presence_conf": 0.0,
         "direction": "C",
+        "bearing_deg": 0.0,
+        "bearing_label": "center",
         "rssi_delta": 0.0,
+        "distance_raw": float("nan"),
+        "distance_filtered": float("nan"),
         "pose": "N/A",
         "pose_conf": 0.0,
     }
@@ -253,41 +327,75 @@ def run_demo(
         nonlocal presence_ema, pose_ema, last_dir, l_cnt, r_cnt
         raw = 1.0 if result["presence"] else 0.0
         presence_ema = alpha * raw + (1 - alpha) * presence_ema
-        diff = result["rssi0"] - result["rssi1"]
-        delta = cfg["rssi_delta"]
-        if diff > delta:
-            l_cnt += 1
-            r_cnt = 0
-        elif diff < -delta:
-            r_cnt += 1
-            l_cnt = 0
+        diff = float(result.get("rssi_delta", float("nan")))
+        bearing = float(result.get("bearing_deg", float("nan")))
+        aoa_delta = float(cfg.get("aoa_deadzone_deg", 7.5))
+        rssi_thresh = float(cfg.get("rssi_delta", 3.5))
+        if math.isfinite(bearing):
+            if bearing < -aoa_delta:
+                l_cnt += 1
+                r_cnt = 0
+            elif bearing > aoa_delta:
+                r_cnt += 1
+                l_cnt = 0
+            else:
+                l_cnt = r_cnt = 0
+        elif math.isfinite(diff):
+            if diff > rssi_thresh:
+                l_cnt += 1
+                r_cnt = 0
+            elif diff < -rssi_thresh:
+                r_cnt += 1
+                l_cnt = 0
+            else:
+                l_cnt = r_cnt = 0
         else:
             l_cnt = r_cnt = 0
-        if l_cnt >= 3:
+        if l_cnt >= 2:
             last_dir = "L"
-        elif r_cnt >= 3:
+        elif r_cnt >= 2:
             last_dir = "R"
+        elif math.isfinite(bearing) and abs(bearing) <= aoa_delta:
+            last_dir = "C"
+        elif math.isfinite(diff) and abs(diff) <= rssi_thresh:
+            last_dir = "C"
         pose_label = "N/A"
         pose_conf = 0.0
         if pose_clf is not None:
             pose_label, conf = pose_clf.predict(result["pose_feat"])
             pose_ema = alpha * conf + (1 - alpha) * pose_ema
             pose_conf = pose_ema
+        filtered_distance = range_filter.update(result.get("distance"), result.get("ts"))
         state.update(
             presence="YES" if result["presence"] else "NO",
             presence_conf=presence_ema,
             direction=last_dir,
+            bearing_deg=bearing,
+            bearing_label={"L": "left", "R": "right", "C": "center"}[last_dir],
             rssi_delta=diff,
+            distance_raw=result.get("distance"),
+            distance_filtered=filtered_distance,
             pose=pose_label,
             pose_conf=pose_conf,
         )
+
+        def _finite_or_none(val: float) -> Optional[float]:
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                return None
+            return fval if math.isfinite(fval) else None
+
         iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(result["ts"]))
         entry = {
             "timestamp": iso,
             "presence": bool(result["presence"]),
             "pose": pose_label.lower(),
             "direction": {"L": "left", "R": "right", "C": "center"}[last_dir],
-            "distance_m": float(result["distance"]),
+            "bearing_label": {"L": "left", "R": "right", "C": "center"}[last_dir],
+            "bearing_deg": _finite_or_none(bearing),
+            "distance_m": _finite_or_none(filtered_distance),
+            "distance_raw_m": _finite_or_none(result.get("distance")),
             "confidence": presence_ema,
         }
         print(json.dumps(entry))
@@ -352,6 +460,11 @@ def run(config_path: str | None = None) -> None:
     baseline = None
     if Path(cfg["baseline_file"]).exists():
         baseline = np.load(cfg["baseline_file"])["mean"]
+    range_filter = AlphaBetaFilter(
+        alpha=float(cfg.get("range_alpha", 0.65)),
+        beta=float(cfg.get("range_beta", 0.15)),
+        dt=float(cfg.get("range_dt", cfg.get("window_hop", 0.5))),
+    )
     last_emit = 0.0
 
     def process():
@@ -365,13 +478,23 @@ def run(config_path: str | None = None) -> None:
         start = now - cfg["window_size"]
         result = compute_window(buffer, start, now, baseline, cfg)
         if result:
+            raw_distance = result.get("distance")
+            filtered_distance = range_filter.update(raw_distance, result.get("ts"))
+            bearing = float(result.get("bearing_deg", float("nan")))
+            if isinstance(raw_distance, (int, float)) and math.isfinite(raw_distance):
+                raw_out = float(raw_distance)
+            else:
+                raw_out = None
             iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(result["ts"]))
             entry = {
                 "timestamp": iso,
                 "presence": bool(result["presence"]),
                 "pose": "n/a",
                 "direction": {"L": "left", "R": "right", "C": "center"}[result["direction"]],
-                "distance_m": float(result["distance"]),
+                "bearing_label": {"L": "left", "R": "right", "C": "center"}[result["direction"]],
+                "bearing_deg": bearing if math.isfinite(bearing) else None,
+                "distance_m": filtered_distance if math.isfinite(filtered_distance) else None,
+                "distance_raw_m": raw_out,
                 "confidence": float(result["presence"]),
             }
             utils.rotate_file(cfg["output_file"], cfg["rotation_max_bytes"])
@@ -399,6 +522,11 @@ def run_offline(log_path: str, cfg: dict):
     baseline = None
     if Path(cfg["baseline_file"]).exists():
         baseline = np.load(cfg["baseline_file"])["mean"]
+    range_filter = AlphaBetaFilter(
+        alpha=float(cfg.get("range_alpha", 0.65)),
+        beta=float(cfg.get("range_beta", 0.15)),
+        dt=float(cfg.get("range_dt", cfg.get("window_hop", 0.5))),
+    )
     rows = []
     log_path = Path(log_path)
     wait = cfg.get("log_wait", 5.0)
@@ -419,6 +547,13 @@ def run_offline(log_path: str, cfg: dict):
             start = now - cfg["window_size"]
             result = compute_window(buffer, start, now, baseline, cfg)
             if result:
+                raw_distance = result.get("distance")
+                filtered_distance = range_filter.update(raw_distance, result.get("ts"))
+                result["distance_filtered"] = filtered_distance
+                bearing = float(result.get("bearing_deg", float("nan")))
+                result["bearing_label"] = {"L": "left", "R": "right", "C": "center"}[result["direction"]]
+                if not math.isfinite(bearing):
+                    result["bearing_deg"] = float("nan")
                 rows.append(result)
     import pandas as pd
     df = pd.DataFrame(rows)

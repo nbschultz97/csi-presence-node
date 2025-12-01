@@ -1,10 +1,11 @@
 """Offline pipeline test for ``tests/data/sample.log``.
 
 The log contains 10 packets: five baseline frames followed by five motion
-frames with higher variance and a left RSSI bias. Presence should be flagged
-on five frames and the direction distribution should be {"C": 6, "L": 4,
-"R": 0}. Set ``CSI_TEST_OFFLINE_PRINT=1`` to dump the DataFrame and metrics
-for manual inspection during development.
+frames with higher variance. Presence should be flagged on five frames and the
+direction distribution should now report {"C": 10, "L": 0, "R": 0} because
+AoA bearing defaults to center on the synthetic data. Set
+``CSI_TEST_OFFLINE_PRINT=1`` to dump the DataFrame and metrics for manual
+inspection during development.
 """
 
 import os
@@ -20,7 +21,7 @@ from csi_node import pipeline
 # Expected counts derived from ``sample.log``. The first five packets are
 # baseline (presence==0) and the last five represent motion biased left.
 EXPECTED_PRESENCE_COUNT = 5
-EXPECTED_DIRECTION_COUNTS = {"C": 6, "L": 4, "R": 0}
+EXPECTED_DIRECTION_COUNTS = {"C": 10, "L": 0, "R": 0}
 
 
 def _run() -> None:

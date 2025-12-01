@@ -18,17 +18,29 @@ import sys
 import threading
 import queue
 import subprocess
+import math
+from datetime import datetime
+from statistics import median
 from pathlib import Path
 from tkinter import Tk, StringVar, IntVar, DoubleVar, BooleanVar, END, Menu, simpledialog, Toplevel
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 import shutil
 import time
+from typing import Optional
+
+import numpy as np
 
 try:
     import yaml  # type: ignore
 except Exception:  # pragma: no cover - runtime requirement
     yaml = None
+
+
+from node.aoa import aoa_deg, calibrate_theta_offset
+from node.range import fit_pathloss
+
+from . import utils
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,11 +126,21 @@ class App:
         self.baseline_status = StringVar(value="Baseline: unknown")
         # Dat-mode RSSI offset to align derived RSSI to dBm-like scale
         self.dat_rssi_offset = DoubleVar(value=float(cfg.get("dat_rssi_offset", -60.0)))
+        self.antenna_spacing = DoubleVar(value=float(cfg.get("antenna_spacing_cm", 6.25)))
+        self.theta_offset_deg = DoubleVar(value=float(cfg.get("theta_offset_deg", 0.0)))
+        self.theta_offset_display = StringVar(value=self._format_theta_offset(self.theta_offset_deg.get()))
+        self.range_fit_display = StringVar(value=self._format_range_fit(cfg))
+        self.range_chip_var = StringVar(value="")
+        if cfg.get("calibrated"):
+            self.range_chip_var.set("Cal saved")
         # Optional window override (e.g., Through‑Wall preset)
         self._window_override: float | None = None
         # Tracking window state
         self._tracking_win: Toplevel | None = None
         self._last_entry: dict | None = None
+        self._range_measurements: dict[float, float] = {}
+        self._range_progress_labels: dict[float, ttk.Label] = {}
+        self._range_buttons: dict[float, ttk.Button] = {}
 
         self.cap_plog: ProcessLogger | None = None
         self.conv_plog: ProcessLogger | None = None
@@ -132,6 +154,32 @@ class App:
 
         self._build_ui()
         self._schedule_pump()
+
+    @staticmethod
+    def _format_theta_offset(val: float) -> str:
+        try:
+            return f"Offset: {float(val):+.2f}°"
+        except Exception:
+            return "Offset: —"
+
+    @staticmethod
+    def _format_range_fit(cfg: dict) -> str:
+        try:
+            n = float(cfg.get("path_loss_exponent", float("nan")))
+        except Exception:
+            n = float("nan")
+        try:
+            c = float(cfg.get("path_loss_c", float("nan")))
+        except Exception:
+            c = float("nan")
+        n_txt = f"{n:.2f}" if math.isfinite(n) else "—"
+        c_txt = f"{c:.1f} dBm" if math.isfinite(c) else "—"
+        return f"n: {n_txt}    C: {c_txt}"
+
+    @staticmethod
+    def _format_range_progress_label(dist: float, done: bool) -> str:
+        bullet = "●" if done else "○"
+        return f"{bullet} {dist:.0f} m"
 
     def _build_ui(self) -> None:
         # Menu bar (Tools -> Diagnostics / Setup Passwordless)
@@ -155,6 +203,12 @@ class App:
 
         frm = ttk.Frame(self.root)
         frm.pack(fill="x", padx=10, pady=10)
+
+        style = ttk.Style(self.root)
+        try:
+            style.configure("CalChip.TLabel", background="#2e7d32", foreground="white", padding=(6, 2))
+        except Exception:
+            style.configure("CalChip.TLabel", foreground="green")
 
         # Mode selection
         mode_frame = ttk.LabelFrame(frm, text="Mode")
@@ -213,6 +267,8 @@ class App:
         ttk.Label(ctrl, textvariable=self.calib_status).grid(row=0, column=8, padx=12)
         ttk.Label(ctrl, textvariable=self.baseline_status).grid(row=1, column=8, padx=12, sticky="w")
 
+        self._build_calibration_tab(frm)
+
         # Log output
         log_frame = ttk.LabelFrame(self.root, text="Log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -238,6 +294,56 @@ class App:
         self._update_pwless_status()
         self._update_calibration_status()
         self._update_baseline_status()
+
+    def _build_calibration_tab(self, parent: ttk.Frame) -> None:
+        nb = ttk.Notebook(parent)
+        nb.pack(fill="x", pady=6)
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Calibration")
+
+        aoa_frame = ttk.LabelFrame(tab, text="Angle of Arrival")
+        aoa_frame.pack(fill="x", padx=8, pady=8)
+        ttk.Label(aoa_frame, text="Antenna spacing (cm)").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(aoa_frame, textvariable=self.antenna_spacing, width=8).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        ttk.Button(aoa_frame, text="Save", command=self._save_antenna_spacing).grid(row=0, column=2, sticky="w", padx=6, pady=4)
+        ttk.Label(aoa_frame, textvariable=self.theta_offset_display).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=4)
+        ttk.Button(
+            aoa_frame,
+            text="Zero-Angle Cal (5 s capture)",
+            command=self.zero_angle_cal,
+        ).grid(row=1, column=2, sticky="w", padx=6, pady=4)
+        ttk.Label(
+            aoa_frame,
+            text="Point at the alignment target before starting the capture.",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=6, pady=2)
+
+        range_frame = ttk.LabelFrame(tab, text="Range Calibration")
+        range_frame.pack(fill="x", padx=8, pady=8)
+        ttk.Label(
+            range_frame,
+            text="Record RSSI at set distances, then fit the path-loss curve.",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=6, pady=2)
+        for idx, dist in enumerate((1.0, 2.0, 3.0)):
+            lbl = ttk.Label(range_frame, text=self._format_range_progress_label(dist, False))
+            lbl.grid(row=idx + 1, column=0, sticky="w", padx=6, pady=2)
+            btn = ttk.Button(range_frame, text=f"Record {dist:.0f} m", command=lambda d=dist: self._record_range_point(d))
+            btn.grid(row=idx + 1, column=1, sticky="w", padx=6, pady=2)
+            self._range_progress_labels[dist] = lbl
+            self._range_buttons[dist] = btn
+        self.range_save_btn = ttk.Button(
+            range_frame,
+            text="Save calibration",
+            command=self._save_range_calibration,
+            state="disabled",
+        )
+        self.range_save_btn.grid(row=1, column=2, sticky="w", padx=6, pady=2)
+        ttk.Button(range_frame, text="Reset", command=self._reset_range_progress).grid(row=2, column=2, sticky="w", padx=6, pady=2)
+        ttk.Label(range_frame, textvariable=self.range_fit_display).grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=4)
+        self.range_chip_label = ttk.Label(range_frame, textvariable=self.range_chip_var, style="CalChip.TLabel")
+        self.range_chip_label.grid(row=4, column=2, sticky="e", padx=6, pady=4)
+        if not self.range_chip_var.get():
+            self.range_chip_label.grid_remove()
+        self._update_range_progress()
 
     def _append(self, tag: str, line: str) -> None:
         self.log.insert(END, f"[{tag}] {line}\n")
@@ -854,6 +960,217 @@ class App:
             time.sleep(0.25)
         return False
 
+    def _save_antenna_spacing(self) -> None:
+        if not yaml:
+            messagebox.showerror("Calibration", "YAML support unavailable; cannot save config.")
+            return
+        try:
+            spacing = float(self.antenna_spacing.get())
+            if spacing <= 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("Calibration", "Enter a positive spacing in centimeters.")
+            return
+        try:
+            cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
+        except Exception:
+            cfg = {}
+        cfg["antenna_spacing_cm"] = float(spacing)
+        try:
+            with open(DEFAULT_CFG, "w") as f:
+                yaml.safe_dump(cfg, f, sort_keys=False)
+            self._append("CAL", f"Antenna spacing saved: {spacing:.2f} cm")
+        except Exception as exc:
+            messagebox.showerror("Calibration", f"Failed to save spacing: {exc}")
+
+    def zero_angle_cal(self) -> None:
+        log_path = self._ensure_active_log("CAL")
+        if not log_path:
+            return
+        spacing = float(self.antenna_spacing.get())
+        if spacing <= 0:
+            messagebox.showerror("Calibration", "Set a positive antenna spacing first.")
+            return
+        self._append("CAL", "Recording 5 s for zero-angle reference…")
+        packets = self._collect_packets(log_path, 5.0, "CAL")
+        if not packets:
+            self._append("CAL", "No packets captured for zero-angle calibration.")
+            return
+        freq_hz = self._channel_to_freq(int(self.channel.get())) * 1e6
+        spacing_m = spacing / 100.0
+        angles: list[float] = []
+        for pkt in packets:
+            c1, c2 = self._extract_rx_chains(pkt.get("csi"))
+            if c1 is None or c2 is None:
+                continue
+            ang = aoa_deg(c1, c2, freq_hz, spacing_m, theta_offset=0.0)
+            if math.isfinite(ang):
+                angles.append(float(ang))
+        if not angles:
+            self._append("CAL", "AoA samples invalid; ensure capture is running with dual chains.")
+            return
+        offset = calibrate_theta_offset(angles)
+        self.theta_offset_deg.set(offset)
+        self.theta_offset_display.set(self._format_theta_offset(offset))
+        if yaml:
+            try:
+                cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
+            except Exception:
+                cfg = {}
+            cfg["antenna_spacing_cm"] = float(spacing)
+            cfg["theta_offset_deg"] = float(offset)
+            cfg["aoa_calibrated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            try:
+                with open(DEFAULT_CFG, "w") as f:
+                    yaml.safe_dump(cfg, f, sort_keys=False)
+            except Exception as exc:
+                messagebox.showerror("Calibration", f"Failed to save AoA calibration: {exc}")
+        self._append("CAL", f"Zero-angle offset saved: {offset:+.2f}° ({len(angles)} samples)")
+        self._update_calibration_status()
+
+    def _ensure_active_log(self, tag: str, wait: float = 10.0) -> Optional[Path]:
+        log_path = self._current_jsonl_path or (REPO_ROOT / "data" / "csi_raw.log")
+        now = time.time()
+        try:
+            fresh = log_path.exists() and (now - log_path.stat().st_mtime) < 5.0 and log_path.stat().st_size > 0
+        except Exception:
+            fresh = False
+        if not fresh:
+            self._append(tag, "Starting capture for calibration…")
+            if not self._start_dat_jsonl_capture():
+                self._append(tag, "Failed to start capture for calibration.")
+                return None
+            log_path = self._current_jsonl_path or (REPO_ROOT / "data" / "csi_raw.log")
+            if not (log_path and self._wait_for_file(log_path, wait)):
+                self._append(tag, "Calibration could not find an active JSON log.")
+                return None
+        return log_path
+
+    def _collect_packets(self, log_path: Path, duration: float, tag: str) -> list[dict]:
+        packets: list[dict] = []
+        try:
+            with open(log_path, "r") as fin:
+                fin.seek(0, 2)
+                start = time.time()
+                while time.time() - start < duration:
+                    line = fin.readline()
+                    if not line:
+                        time.sleep(0.05)
+                        continue
+                    pkt = utils.parse_csi_line(line)
+                    if pkt:
+                        packets.append(pkt)
+        except Exception as exc:
+            self._append(tag, f"Log read failed: {exc}")
+            return []
+        return packets
+
+    @staticmethod
+    def _extract_rx_chains(csi) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        arr = np.asarray(csi)
+        if arr.size == 0:
+            return None, None
+        if arr.ndim >= 1 and arr.shape[-1] == 2 and not np.iscomplexobj(arr):
+            arr = arr[..., 0] + 1j * arr[..., 1]
+        arr = np.asarray(arr, dtype=np.complex128)
+        if arr.ndim <= 1:
+            return None, None
+        if arr.shape[0] >= 2:
+            return arr[0].reshape(-1), arr[1].reshape(-1)
+        if arr.shape[-1] >= 2:
+            return arr[..., 0].reshape(-1), arr[..., 1].reshape(-1)
+        return None, None
+
+    @staticmethod
+    def _median_rssi(packets: list[dict]) -> Optional[float]:
+        values: list[float] = []
+        for pkt in packets:
+            rssi = pkt.get("rssi")
+            if isinstance(rssi, (list, tuple)) and len(rssi) >= 2:
+                try:
+                    values.append((float(rssi[0]) + float(rssi[1])) / 2.0)
+                except Exception:
+                    continue
+        if not values:
+            return None
+        return float(median(values))
+
+    def _record_range_point(self, dist: float) -> None:
+        log_path = self._ensure_active_log("CAL")
+        if not log_path:
+            return
+        self._append("CAL", f"Recording RSSI at {dist:.1f} m…")
+        packets = self._collect_packets(log_path, 6.0, "CAL")
+        rssi = self._median_rssi(packets)
+        if rssi is None:
+            self._append("CAL", "RSSI capture failed; ensure packets include dual-chain RSSI.")
+            return
+        self._range_measurements[dist] = rssi
+        self._append("CAL", f"{dist:.1f} m median RSSI: {rssi:.2f} dBm")
+        self._range_chip_var.set("")
+        self.range_chip_label.grid_remove()
+        self._update_range_progress()
+
+    def _reset_range_progress(self) -> None:
+        self._range_measurements.clear()
+        self._range_chip_var.set("")
+        self.range_chip_label.grid_remove()
+        self.range_save_btn.config(state="disabled")
+        self._update_range_progress()
+        self._append("CAL", "Range calibration reset.")
+
+    def _update_range_progress(self) -> None:
+        for dist, lbl in self._range_progress_labels.items():
+            done = dist in self._range_measurements
+            lbl.config(text=self._format_range_progress_label(dist, done))
+            btn = self._range_buttons.get(dist)
+            if btn:
+                btn.config(state="disabled" if done else "normal")
+        ready = all(dist in self._range_measurements for dist in (1.0, 2.0, 3.0))
+        self.range_save_btn.config(state="normal" if ready else "disabled")
+
+    def _save_range_calibration(self) -> None:
+        if not yaml:
+            messagebox.showerror("Calibration", "YAML support unavailable; cannot save config.")
+            return
+        required = [1.0, 2.0, 3.0]
+        if not all(dist in self._range_measurements for dist in required):
+            messagebox.showinfo("Calibration", "Record RSSI at 1 m, 2 m, and 3 m first.")
+            return
+        baseline = (1.0, self._range_measurements[1.0])
+        points = [(dist, self._range_measurements[dist]) for dist in required[1:]]
+        try:
+            n, c = fit_pathloss(baseline, points)
+        except Exception as exc:
+            messagebox.showerror("Calibration", f"Path-loss fit failed: {exc}")
+            return
+        txp = float(self._range_measurements[1.0])
+        try:
+            cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
+        except Exception:
+            cfg = {}
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        cfg.update(
+            {
+                "path_loss_exponent": float(n),
+                "path_loss_c": float(c),
+                "tx_power_dbm": float(txp),
+                "calibrated": True,
+                "calibrated_at": now,
+                "range_calibrated_at": now,
+            }
+        )
+        try:
+            with open(DEFAULT_CFG, "w") as f:
+                yaml.safe_dump(cfg, f, sort_keys=False)
+        except Exception as exc:
+            messagebox.showerror("Calibration", f"Failed to write config: {exc}")
+            return
+        self.range_fit_display.set(self._format_range_fit(cfg))
+        self.range_chip_var.set("Cal saved")
+        self.range_chip_label.grid()
+        self._append("CAL", f"Range fit saved: n={n:.3f}, C={c:.2f} dBm")
+        self._update_calibration_status()
     def _restart_networking(self) -> None:
         self._append("AUTO", "Re-enabling Wi‑Fi and restarting NetworkManager…")
         # Unblock rfkill regardless
@@ -1228,36 +1545,11 @@ class App:
             messagebox.showerror("Edit Thresholds", f"Failed to write config: {exc}")
 
     def calibrate_distance(self) -> None:
-        """Run distance calibration helper from the GUI."""
-        # Choose two logs
-        path1 = filedialog.askopenfilename(title="Select first log (at distance d1)", filetypes=[("JSONL", ".log"), ("All files", "*.*")])
-        if not path1:
-            return
-        d1 = simpledialog.askfloat("Calibrate Distance", "Enter distance d1 (meters)", initialvalue=1.0)
-        if not d1:
-            return
-        path2 = filedialog.askopenfilename(title="Select second log (at distance d2)", filetypes=[("JSONL", ".log"), ("All files", "*.*")])
-        if not path2:
-            return
-        d2 = simpledialog.askfloat("Calibrate Distance", "Enter distance d2 (meters)", initialvalue=3.0)
-        if not d2:
-            return
-        cmd = [sys.executable, "-m", "csi_node.calibrate", "--log1", path1, "--d1", str(d1), "--log2", path2, "--d2", str(d2), "--config", str(DEFAULT_CFG)]
-        self._append("CAL", f"Running: {' '.join(cmd)}")
-        try:
-            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            out, err = proc.communicate()
-            for line in (out or "").splitlines():
-                self._append("CAL", line)
-            for line in (err or "").splitlines():
-                self._append("CAL", line)
-            if proc.returncode == 0:
-                self._append("CAL", "Calibration complete and written to config.")
-                self._update_calibration_status()
-            else:
-                self._append("CAL", f"Calibration exited with code {proc.returncode}")
-        except Exception as exc:
-            messagebox.showerror("Calibrate Distance", f"Failed to run calibrator: {exc}")
+        messagebox.showinfo(
+            "Range Calibration",
+            "Use the Calibration tab to capture 1 m / 2 m / 3 m RSSI and save the fit.",
+        )
+        self._append("CAL", "Range calibration lives in the Calibration tab (1m/2m/3m workflow).")
 
     def _update_calibration_status(self) -> None:
         if not yaml or not DEFAULT_CFG.exists():
@@ -1265,9 +1557,20 @@ class App:
             return
         try:
             cfg = yaml.safe_load(open(DEFAULT_CFG)) or {}
-            calib = bool(cfg.get("calibrated", False))
-            when = cfg.get("calibrated_at", "")
-            self.calib_status.set(f"Calibrated: {'yes' if calib else 'no'} {when}")
+        except Exception:
+            self.calib_status.set("Calibrated: unknown")
+            return
+        try:
+            range_cal = bool(cfg.get("calibrated", False))
+            range_when = cfg.get("range_calibrated_at") or cfg.get("calibrated_at", "")
+            aoa_offset = cfg.get("theta_offset_deg")
+            aoa_cal = math.isfinite(float(aoa_offset)) if aoa_offset is not None else False
+            aoa_when = cfg.get("aoa_calibrated_at", "")
+            status = (
+                f"Range: {'yes' if range_cal else 'no'} {range_when or ''}"
+                f" | AoA: {'yes' if aoa_cal else 'no'} {aoa_when or ''}"
+            )
+            self.calib_status.set(status.strip())
         except Exception:
             self.calib_status.set("Calibrated: unknown")
 

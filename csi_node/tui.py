@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import curses
 import time
+import math
 from threading import Event
 from typing import Dict, Optional
 
@@ -21,22 +22,33 @@ def run(state: Dict[str, float], stop: Event, log_path: str, mode: str, replay_p
                 0,
                 f"Presence: {state.get('presence', 'NO'):>3}      Confidence: {state.get('presence_conf', 0.0):.2f}",
             )
+            bearing = state.get("bearing_deg", float("nan"))
+            bearing_label = state.get("bearing_label", "center")
+            if isinstance(bearing, (int, float)) and math.isfinite(bearing):
+                bearing_txt = f"{bearing:+06.1f}°"
+            else:
+                bearing_txt = "   —   "
             stdscr.addstr(
                 2,
                 0,
-                f"Direction: {state.get('direction', 'C'):>5}    RSSIΔ: {state.get('rssi_delta', 0.0):+5.1f} dB",
+                f"Bearing: {bearing_label:<6} {bearing_txt}  RSSIΔ: {state.get('rssi_delta', 0.0):+5.1f} dB",
             )
+            rng = state.get("distance_filtered", float("nan"))
+            raw_rng = state.get("distance_raw", float("nan"))
+            rng_txt = f"{rng:.2f} m" if isinstance(rng, (int, float)) and math.isfinite(rng) else "—"
+            raw_txt = f"{raw_rng:.2f} m" if isinstance(raw_rng, (int, float)) and math.isfinite(raw_rng) else "—"
+            stdscr.addstr(3, 0, f"Range: {rng_txt:<8} Raw: {raw_txt:<8}")
             stdscr.addstr(
-                3,
+                4,
                 0,
                 f"Pose: {state.get('pose', 'N/A'):>9} Confidence: {state.get('pose_conf', 0.0):.2f}",
             )
-            stdscr.addstr(4, 0, f"Log: {log_path}")
+            stdscr.addstr(5, 0, f"Log: {log_path}")
             if replay_path:
-                stdscr.addstr(5, 0, f"Mode: REPLAY: {replay_path}")
+                stdscr.addstr(6, 0, f"Mode: REPLAY: {replay_path}")
             else:
-                stdscr.addstr(5, 0, f"Mode: {mode}")
-            stdscr.addstr(7, 0, "[q]=quit")
+                stdscr.addstr(6, 0, f"Mode: {mode}")
+            stdscr.addstr(8, 0, "[q]=quit")
             stdscr.refresh()
             stdscr.timeout(250)  # ~4 Hz refresh
             ch = stdscr.getch()
