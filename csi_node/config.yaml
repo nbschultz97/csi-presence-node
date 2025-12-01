@@ -4,11 +4,13 @@ window_size: 1.0
 window_hop: 0.5
 variance_threshold: 5.0
 pca_threshold: 1.0
-rssi_delta: 3.5
+rssi_delta: 2.0
 baseline_file: data/baselines/baseline-20250917-114733.npz
 log_file: ./data/csi_raw.log
 output_file: ./data/presence_log.jsonl
 rotation_max_bytes: 1048576
+rotation_interval_seconds: 600
+rotation_retention: 5
 tx_power_dbm: -24.81035704265738
 path_loss_exponent: -0.0911332407886912
 calibrated: true
