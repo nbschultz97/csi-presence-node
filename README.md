@@ -20,6 +20,13 @@ virtual environment:
 source .venv/bin/activate
 ```
 
+After installing, run the doctor to surface any missing capabilities or path
+issues before you try a capture:
+
+```bash
+./scripts/doctor.sh --iface wlan0
+```
+
 ### First‑time setup (recommended)
 
 - Grant FeitCSI capabilities once so capture can run without sudo prompts:
@@ -105,6 +112,15 @@ Troubleshooting quick fixes:
   is running so the JSON log is active) and increase
   `variance_threshold`/`pca_threshold`. A longer window (2.5–3.0 s) also helps.
 - Prefer 2.4 GHz (ch1/20 MHz) through one interior wall for stronger signals.
+
+If things still won’t start, run the doctor and follow the hints it prints:
+
+```bash
+./scripts/doctor.sh --iface wlan0
+```
+
+It checks that `config.yaml` loads, FeitCSI exists with the right capabilities,
+debugfs is mounted, and the log directories are writable.
 
 ## Capabilities and limits
 
