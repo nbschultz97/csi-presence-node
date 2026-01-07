@@ -32,7 +32,7 @@ class PoseClassifier:
     @staticmethod
     def _toy_model() -> LogisticRegression:
         """Return a deterministic logistic regression model with 3 classes."""
-        clf = LogisticRegression(multi_class="ovr")
+        clf = LogisticRegression()
         # Deterministic dataset: three points mapping to three poses.
         X = np.array(
             [
@@ -65,7 +65,7 @@ def _train(in_path: str | None, out_path: str) -> None:
         rng = np.random.default_rng(0)
         X = rng.normal(size=(48, 2))
         y = rng.integers(0, 3, size=48)
-    clf = LogisticRegression(max_iter=1000, multi_class="ovr")
+    clf = LogisticRegression(max_iter=1000)
     clf.fit(X, y)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(clf, out_path)
