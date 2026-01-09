@@ -1,8 +1,49 @@
 # csi-presence-node
 
+**Legal Entity:** Ceradon Systems, LLC (West Haven, UT)  
+**CAGE Code:** 179U9 (Active)  
+**Unique Entity ID (UEI):** UZA9PFJ9RDL6  
+**Status:** Commercial Proprietary Asset. All rights assigned per the
+Intellectual Property Assignment Agreement (Sept 2025).
+
 Vantage Scanner demo node. Streams WiFi CSI from an Intel AX210 via
 [FeitCSI](https://github.com/KuskoSoft/FeitCSI) and outputs presence, direction
 and a coarse pose estimate (standing / crouching / prone).
+
+## Governance & Boundary Enforcement
+
+**Absolute Boundary Principle:** "Ceradon Vantage is a proprietary commercial
+product of Ceradon Systems, LLC. It is architecturally and legally independent
+from open-source planning tools".
+
+Core logic: planning tools produce hypotheses; Vantage produces authoritative
+sensing decisions.
+
+## What it is (Mission & Doctrinal Alignment, ATP 3-90.51)
+
+- **Passive ISR flagship:** zero-emission through-wall human sensing.
+- **Problem solved:** detects human presence, pose, and movement without active
+  radar signatures or visible/IR emissions, reducing operator RF footprint
+  ("glowing") in contested environments.
+- **Battle drill support:** supports Breach Operations (SOSRA) and "Enter and
+  Clear" maneuvers by providing visibility into structures before the breach
+  force crosses the threshold.
+
+## Technical specifications
+
+- **Sensing engine:** WiFi Channel State Information (CSI) for posture-aware
+  alerts and skeletal movement tracking.
+- **Form factors:** modular Tripod Nodes (long-duration overwatch), Handheld
+  Kits (breaching teams), and UxS Payloads.
+- **Edge architecture:** offline, edge-only pipelines on Pi or Jetson-class
+  hardware.
+
+## Integration standards
+
+- **ATAK readiness:** output (presence zones and skeletal overlays) is designed
+  to integrate directly into ATAK to make sensing data part of the map.
+- **Standardized telemetry:** future compatibility with Telemetry Forge schemas
+  to unify data language across Ceradon products.
 
 ## Hardware
 
