@@ -1,17 +1,58 @@
-channel: 36
-bandwidth: 80
-window_size: 1.0
-window_hop: 0.5
-variance_threshold: 5.0
-pca_threshold: 1.0
-rssi_delta: 2.0
+# CSI Presence Node Configuration
+# ================================
+
+# Hardware Settings
+channel: 36                    # WiFi channel (1-14: 2.4GHz, 36-196: 5GHz)
+bandwidth: 80                  # MHz (20/40/80/160)
+
+# Processing Parameters
+window_size: 1.0               # Seconds (temporal smoothing)
+window_hop: 0.5                # Seconds (output rate)
+variance_threshold: 5.0        # Motion sensitivity (CSI variance)
+pca_threshold: 1.0             # Motion sensitivity (PCA eigenvalue)
+rssi_delta: 2.0                # Direction threshold (dB L/R difference)
+
+# Calibration (run python -m csi_node.calibrate to update)
+# NOTE: path_loss_exponent should be positive (typically 2.0-4.0)
+# A negative value indicates calibration error - recalibrate!
+tx_power_dbm: -40.0            # RSSI at 1m (needs recalibration)
+path_loss_exponent: 2.0        # Log-distance exponent (reset to default)
+calibrated: false              # Marked false - needs recalibration
+calibrated_at: null
+
+# Baseline
 baseline_file: data/baselines/baseline-20250917-114733.npz
+
+# File Paths
 log_file: ./data/csi_raw.log
 output_file: ./data/presence_log.jsonl
-rotation_max_bytes: 1048576
-rotation_interval_seconds: 600
-rotation_retention: 5
-tx_power_dbm: -24.81035704265738
-path_loss_exponent: -0.0911332407886912
-calibrated: true
-calibrated_at: '2025-09-17T17:53:41Z'
+
+# Logging
+rotation_max_bytes: 1048576    # 1MB log rotation
+rotation_interval_seconds: 600 # 10min time-based rotation
+rotation_retention: 5          # Keep last 5 rotated files
+
+# UDP Streaming (NEW)
+udp_enabled: false             # Enable UDP broadcast of presence data
+udp_host: "239.2.3.1"          # Multicast address (or unicast IP)
+udp_port: 4243                 # Port for JSON streaming
+udp_ttl: 1                     # Multicast TTL
+
+# ATAK Integration (NEW)
+atak_enabled: false            # Enable ATAK CoT streaming
+atak_port: 4242                # Standard ATAK SA port
+sensor_uid: "vantage-001"      # Unique sensor identifier
+sensor_callsign: "VANTAGE-1"   # Display name in ATAK
+sensor_lat: 0.0                # Sensor latitude (set for your location)
+sensor_lon: 0.0                # Sensor longitude (set for your location)
+sensor_heading: 0.0            # Sensor heading in degrees (0=N, 90=E)
+
+# Pose Classification
+pose_enabled: false            # Enable pose classification
+pose_model: "models/wipose.joblib"  # Path to trained model
+
+# Daemon Settings
+daemon_log_file: "/var/log/csi-presence/daemon.log"
+max_restarts: 10               # Max restart attempts before giving up
+restart_delay: 5.0             # Seconds between restart attempts
+debug: false                   # Enable debug logging

@@ -13,8 +13,14 @@ from watchdog.events import FileSystemEventHandler
 from threading import Event, Thread
 
 from . import utils
-from . import tui as tui_mod  # curses dashboard hooks
 from . import replay as replay_mod
+from . import config_validator
+
+# TUI is optional (requires curses, Unix-only)
+try:
+    from . import tui as tui_mod
+except ImportError:
+    tui_mod = None  # TUI unavailable on Windows
 
 CAPTURE_EXIT_CODE = 2
 STALE_THRESHOLD = 5.0
@@ -191,6 +197,26 @@ def run_demo(
     if log_override:
         cfg["log_file"] = log_override
 
+    # Validate configuration and warn about issues
+    validation = config_validator.validate_config(cfg)
+    if not validation.valid:
+        for err in validation.errors:
+            print(f"[config error] {err}", file=sys.stderr)
+    for warn in validation.warnings:
+        print(f"[config warn] {warn}", file=sys.stderr)
+
+    # Initialize UDP streamer if enabled
+    udp_streamer = None
+    if cfg.get("udp_enabled", False):
+        try:
+            from . import udp_streamer as udp_mod
+            udp_streamer = udp_mod.UDPStreamer.from_config(cfg)
+            print(f"[udp] Streaming to {cfg.get('udp_host')}:{cfg.get('udp_port')}", file=sys.stderr)
+            if cfg.get("atak_enabled", False):
+                print(f"[atak] CoT streaming to port {cfg.get('atak_port')}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[udp] Failed to initialize streamer: {exc}", file=sys.stderr)
+
     log_manager = utils.RunLogManager(
         cfg["output_file"],
         rotation_bytes=int(cfg.get("rotation_max_bytes", 1_048_576)),
@@ -234,13 +260,16 @@ def run_demo(
     # Track whether any frames have arrived, to surface clearer diagnostics
     first_frame_seen = Event()
     if tui:
-        mode = "LIVE (FeitCSI)" if replay_path is None else "REPLAY"
-        tui_thread = Thread(
-            target=tui_mod.run,
-            args=(state, stop, out_path, mode, replay_path),
-            daemon=True,
-        )
-        tui_thread.start()
+        if tui_mod is None:
+            print("[warning] TUI requested but curses not available (Windows?). Running headless.", file=sys.stderr)
+        else:
+            mode = "LIVE (FeitCSI)" if replay_path is None else "REPLAY"
+            tui_thread = Thread(
+                target=tui_mod.run,
+                args=(state, stop, out_path, mode, replay_path),
+                daemon=True,
+            )
+            tui_thread.start()
 
     # Emit a helpful status and enforce a timeout if no frames are seen
     wait_timeout = float(cfg.get("frames_wait_timeout", 10.0))
@@ -305,6 +334,9 @@ def run_demo(
         try:
             latest_pkt = buffer[-1] if buffer else None
             log_manager.append(entry, frame=result, latest_packet=latest_pkt)
+            # Stream via UDP if enabled
+            if udp_streamer is not None:
+                udp_streamer.send(entry)
         except Exception as exc:  # pragma: no cover - fatal path
             if fatal_exc is None:
                 fatal_exc = exc

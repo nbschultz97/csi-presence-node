@@ -2,8 +2,29 @@
 from __future__ import annotations
 import json
 import os
-import fcntl
+import sys
 import tempfile
+
+# Cross-platform file locking
+if sys.platform == 'win32':
+    import msvcrt
+    def _lock_file(f):
+        """Lock file on Windows."""
+        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+    def _unlock_file(f):
+        """Unlock file on Windows."""
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass  # May fail if not locked
+else:
+    import fcntl
+    def _lock_file(f):
+        """Lock file on Unix."""
+        fcntl.flock(f, fcntl.LOCK_EX)
+    def _unlock_file(f):
+        """Unlock file on Unix."""
+        fcntl.flock(f, fcntl.LOCK_UN)
 import time
 import logging
 import traceback
@@ -249,12 +270,12 @@ def safe_csv_append(path: str, row: List) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
         with open(path, "a") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+            _lock_file(f)
             with open(tmp_path) as tmp:
                 f.write(tmp.read())
             f.flush()
             os.fsync(f.fileno())
-            fcntl.flock(f, fcntl.LOCK_UN)
+            _unlock_file(f)
     finally:
         try:
             os.remove(tmp_path)
@@ -273,12 +294,12 @@ def safe_json_append(path: str, obj: Dict) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
         with open(path, "a") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+            _lock_file(f)
             with open(tmp_path) as tmp:
                 f.write(tmp.read())
             f.flush()
             os.fsync(f.fileno())
-            fcntl.flock(f, fcntl.LOCK_UN)
+            _unlock_file(f)
     finally:
         try:
             os.remove(tmp_path)

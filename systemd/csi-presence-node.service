@@ -1,0 +1,35 @@
+[Unit]
+Description=CSI Presence Detection Node (Vantage Scanner)
+Documentation=https://github.com/nbschultz97/csi-presence-node
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/csi-presence-node
+ExecStart=/opt/csi-presence-node/.venv/bin/python -m csi_node.daemon
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=csi-presence
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/csi-presence-node/data /var/log/csi-presence
+PrivateTmp=true
+
+# Required capabilities for network capture
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+Environment=CSI_NODE_CONFIG=/opt/csi-presence-node/csi_node/config.yaml
+
+[Install]
+WantedBy=multi-user.target
