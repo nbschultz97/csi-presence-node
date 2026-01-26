@@ -2,6 +2,9 @@
 """CSI Presence Node - Entry Point
 
 Usage:
+    # First-time setup (RECOMMENDED for new installs)
+    python run.py --setup
+
     # Live capture with TUI
     python run.py --iface wlan0 --tui --pose
 
@@ -46,6 +49,11 @@ def main():
         action="store_true",
         help="Train pose classifier",
     )
+    mode_group.add_argument(
+        "--setup",
+        action="store_true",
+        help="Run guided setup wizard (recommended for first-time setup)",
+    )
 
     # Pipeline arguments (when not in special mode)
     parser.add_argument("--pose", action="store_true", help="Enable pose classifier")
@@ -76,6 +84,11 @@ def main():
         from csi_node.pose_classifier import main as pose_main
         sys.argv = ["pose_classifier", "--train"]
         pose_main()
+        return
+
+    if args.setup:
+        from csi_node.setup_wizard import main as setup_main
+        setup_main()
         return
 
     # Normal pipeline mode
