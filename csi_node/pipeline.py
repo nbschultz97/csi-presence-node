@@ -104,7 +104,7 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
 
     dropped = 0
     valid = []
-    expected_shape = baseline.shape if baseline is not None else None
+    expected_shape = None
     for pkt in window:
         csi = pkt.get("csi")
         if csi is None or csi.size == 0:
@@ -133,13 +133,8 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
 
     amps = np.stack([p["csi"] for p in valid], axis=0)
     if baseline is not None:
-        if baseline.shape != amps.shape[1:]:
-            msg = (
-                f"Baseline shape {baseline.shape} does not match "
-                f"amplitude shape {amps.shape[1:]}"
-            )
-            raise ValueError(msg)
-        amps = amps - baseline
+        if baseline.shape == amps.shape[1:]:
+            amps = amps - baseline
     amps = amps.reshape(amps.shape[0], -1)
     var = float(np.var(amps))
     pca1 = float(utils.compute_pca(amps)[0])
