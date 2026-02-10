@@ -15,12 +15,59 @@ from threading import Event, Thread
 from . import utils
 from . import replay as replay_mod
 from . import config_validator
+from . import preprocessing
+from .pose_classifier import extract_features
 
 # TUI is optional (requires curses, Unix-only)
 try:
     from . import tui as tui_mod
 except ImportError:
     tui_mod = None  # TUI unavailable on Windows
+
+class PresenceDetector:
+    """Lightweight presence detector using CSI variance patterns.
+
+    Simpler than full pose classification — just detects human presence vs
+    empty room.  Uses an adaptive threshold based on a running baseline of
+    CSI variance in an empty room.  Suitable for always-on monitoring where
+    pose detail is unnecessary.
+    """
+
+    def __init__(
+        self,
+        var_threshold: float = 5.0,
+        pca_threshold: float = 1.0,
+        ema_alpha: float = 0.2,
+        baseline_var: float | None = None,
+    ):
+        self.var_threshold = var_threshold
+        self.pca_threshold = pca_threshold
+        self.ema_alpha = ema_alpha
+        self._ema = 0.0
+        self._baseline_var = baseline_var
+
+    def update(self, var: float, pca1: float) -> dict:
+        """Feed a new window's statistics and return presence state.
+
+        Returns:
+            Dict with keys: present (bool), confidence (float 0-1),
+            var_ratio (float — how far above baseline).
+        """
+        raw = 1.0 if (var > self.var_threshold or pca1 > self.pca_threshold) else 0.0
+        self._ema = self.ema_alpha * raw + (1 - self.ema_alpha) * self._ema
+        var_ratio = var / self.var_threshold if self.var_threshold > 0 else 0.0
+        return {
+            "present": self._ema > 0.5,
+            "confidence": self._ema,
+            "var_ratio": var_ratio,
+        }
+
+    def set_baseline(self, var: float) -> None:
+        """Calibrate baseline variance from an empty room capture."""
+        self._baseline_var = var
+        # Set threshold to 3× baseline for adaptive detection
+        self.var_threshold = max(var * 3.0, 1.0)
+
 
 CAPTURE_EXIT_CODE = 2
 STALE_THRESHOLD = 5.0
@@ -97,7 +144,15 @@ class CSILogHandler(FileSystemEventHandler):
         self._size = self._fp.tell()
 
 
-def compute_window(buffer, start_ts, end_ts, baseline, cfg):
+def compute_window(buffer, start_ts, end_ts, baseline, cfg, prev_var=None):
+    """Compute features for one sliding window of CSI packets.
+
+    Pipeline: validate → baseline subtract → Hampel + Butterworth conditioning
+    → full 14-feature extraction → presence & movement classification.
+
+    Args:
+        prev_var: Variance from the previous window, used for movement detection.
+    """
     window = [p for p in buffer if start_ts <= p["ts"] <= end_ts]
     if not window:
         return None
@@ -136,19 +191,34 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
         if baseline.shape == amps.shape[1:]:
             amps = amps - baseline
     amps = amps.reshape(amps.shape[0], -1)
+
+    # --- Signal conditioning: Hampel outlier rejection + Butterworth bandpass ---
+    # Skip conditioning on very short windows (need enough samples for filters)
+    min_conditioning_samples = cfg.get("min_conditioning_samples", 15)
+    if amps.shape[0] >= min_conditioning_samples:
+        fs = cfg.get("sample_rate_hz", 30.0)
+        amps = preprocessing.condition_signal(
+            amps, fs=fs,
+            hampel_window=cfg.get("hampel_window", 5),
+            hampel_sigma=cfg.get("hampel_sigma", 3.0),
+            bp_low=cfg.get("bp_low_hz", 0.1),
+            bp_high=cfg.get("bp_high_hz", 10.0),
+        )
+
     var = float(np.var(amps))
     pca1 = float(utils.compute_pca(amps)[0])
-    abs_amps = np.abs(amps)
-    mean_mag = float(np.mean(abs_amps))
-    std_mag = float(np.std(abs_amps))
+
+    # --- RSSI processing (direction + distance) ---
     rssi0 = rssi1 = float("nan")
     direction = "C"
+    rssi_list = None
     rssis = [p.get("rssi") for p in valid if p.get("rssi")]
     if rssis and all(len(r) >= 2 for r in rssis):
         r0_vals = [r[0] for r in rssis]
         r1_vals = [r[1] for r in rssis]
         rssi0 = float(np.mean(r0_vals))
         rssi1 = float(np.mean(r1_vals))
+        rssi_list = [rssi0, rssi1]
         diff = rssi0 - rssi1
         delta = cfg["rssi_delta"]
         if diff > delta:
@@ -159,16 +229,31 @@ def compute_window(buffer, start_ts, end_ts, baseline, cfg):
     txp = float(cfg.get("tx_power_dbm", -40.0))
     ple = float(cfg.get("path_loss_exponent", 2.0))
     distance = utils.rssi_to_distance(avg_rssi, txp, ple)
+
+    # --- Presence detection ---
     presence = int(var > cfg["variance_threshold"] or pca1 > cfg["pca_threshold"])
+
+    # --- Movement classification (variance delta between consecutive windows) ---
+    movement = "stationary"
+    movement_threshold = cfg.get("movement_threshold", 2.0)
+    if prev_var is not None:
+        var_delta = abs(var - prev_var)
+        if var_delta > movement_threshold:
+            movement = "moving"
+
+    # --- Full 14-feature extraction (feeds pose classifier) ---
+    pose_feat = extract_features(amps, rssi=rssi_list, extended=True)
+
     return {
         "presence": presence,
         "direction": direction,
+        "movement": movement,
         "var": var,
         "pca1": pca1,
         "rssi0": rssi0,
         "rssi1": rssi1,
         "distance": distance,
-        "pose_feat": np.array([mean_mag, std_mag]),
+        "pose_feat": pose_feat,
         "ts": end_ts,
     }
 
@@ -239,6 +324,7 @@ def run_demo(
     pose_ema = 0.0
     last_dir = "C"
     l_cnt = r_cnt = 0
+    prev_var = None  # Track previous window variance for movement detection
 
     state = {
         "presence": "NO",
@@ -285,7 +371,7 @@ def run_demo(
     Thread(target=_timeout_watchdog, daemon=True).start()
 
     def handle(result: dict) -> None:
-        nonlocal presence_ema, pose_ema, last_dir, l_cnt, r_cnt, fatal_exc
+        nonlocal presence_ema, pose_ema, last_dir, l_cnt, r_cnt, fatal_exc, prev_var
         raw = 1.0 if result["presence"] else 0.0
         presence_ema = alpha * raw + (1 - alpha) * presence_ema
         diff = result["rssi0"] - result["rssi1"]
@@ -305,6 +391,7 @@ def run_demo(
         pose_label = "N/A"
         pose_conf = 0.0
         if pose_clf is not None:
+            # Full 14-feature vector is now passed from compute_window
             pose_label, conf = pose_clf.predict(result["pose_feat"])
             pose_ema = alpha * conf + (1 - alpha) * pose_ema
             pose_conf = pose_ema
@@ -316,10 +403,13 @@ def run_demo(
             pose=pose_label,
             pose_conf=pose_conf,
         )
+        # Update prev_var for next movement classification
+        prev_var = result["var"]
         iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(result["ts"]))
         entry = {
             "timestamp": iso,
             "presence": bool(result["presence"]),
+            "movement": result.get("movement", "stationary"),
             "pose": pose_label.lower(),
             "direction": {"L": "left", "R": "right", "C": "center"}[last_dir],
             "distance_m": float(result["distance"]),
@@ -347,7 +437,7 @@ def run_demo(
             while buffer and now - buffer[0]["ts"] > cfg["window_size"]:
                 buffer.popleft()
             start = now - cfg["window_size"]
-            result = compute_window(buffer, start, now, baseline, cfg)
+            result = compute_window(buffer, start, now, baseline, cfg, prev_var=prev_var)
             if result:
                 handle(result)
         except Exception as exc:
@@ -432,12 +522,13 @@ def run(config_path: str | None = None) -> None:
     if Path(cfg["baseline_file"]).exists():
         baseline = np.load(cfg["baseline_file"])["mean"]
     last_emit = 0.0
+    prev_var = None
     stop = Event()
     fatal_exc: BaseException | None = None
     fatal_logged = False
 
     def process():
-        nonlocal last_emit, fatal_exc
+        nonlocal last_emit, fatal_exc, prev_var
         try:
             now = buffer[-1]["ts"]
             while buffer and now - buffer[0]["ts"] > cfg["window_size"]:
@@ -446,12 +537,14 @@ def run(config_path: str | None = None) -> None:
                 return
             last_emit = now
             start = now - cfg["window_size"]
-            result = compute_window(buffer, start, now, baseline, cfg)
+            result = compute_window(buffer, start, now, baseline, cfg, prev_var=prev_var)
             if result:
+                prev_var = result["var"]
                 iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(result["ts"]))
                 entry = {
                     "timestamp": iso,
                     "presence": bool(result["presence"]),
+                    "movement": result.get("movement", "stationary"),
                     "pose": "n/a",
                     "direction": {"L": "left", "R": "right", "C": "center"}[result["direction"]],
                     "distance_m": float(result["distance"]),
