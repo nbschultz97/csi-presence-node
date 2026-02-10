@@ -2,8 +2,10 @@
 # ================================
 
 # Hardware Settings
-channel: 36                    # WiFi channel (1-14: 2.4GHz, 36-196: 5GHz)
-bandwidth: 80                  # MHz (20/40/80/160)
+# Default: 2.4 GHz channel 1 @ 20 MHz — optimal for through-wall penetration.
+# 2.4 GHz signals attenuate less through walls/obstacles than 5 GHz.
+channel: 1                     # WiFi channel (1-14: 2.4GHz, 36-196: 5GHz)
+bandwidth: 20                  # MHz (20/40/80/160)
 
 # Processing Parameters
 window_size: 1.0               # Seconds (temporal smoothing)
