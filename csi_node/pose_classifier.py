@@ -224,33 +224,51 @@ class PoseClassifier:
             self._using_toy_model = True
 
     def _create_toy_model(self):
-        """Create a deterministic toy model for demo purposes.
+        """Create a production-architecture toy model for demo/fallback.
 
-        This model provides plausible-looking outputs but is NOT trained
-        on real data. Replace with a properly trained model for production.
+        Uses RandomForestClassifier (production-ready architecture) trained on
+        synthetic data.  The feature distributions are hand-tuned approximations
+        of expected CSI patterns for each pose.  Replace with a model trained
+        on real labeled data for deployment.
         """
         if not SKLEARN_AVAILABLE:
             return None
 
-        # Create a simple model with hand-crafted decision boundaries
-        clf = LogisticRegression(max_iter=1000)
-
-        # Synthetic training data based on expected feature patterns:
-        # STANDING: High mean magnitude, low variance (upright body)
-        # CROUCHING: Medium magnitude, higher variance (compressed body)
-        # PRONE: Low magnitude, spread features (body parallel to ground)
         rng = np.random.default_rng(42)
+        n_samples = 200  # per class
 
-        n_samples = 100
-        X_standing = rng.normal([10, 2, 12, 6, 6, 5, 3, 1, 0.5, 2, 0.1, 1, 0, 0], 1, (n_samples, 14))
-        X_crouching = rng.normal([7, 3, 10, 4, 6, 8, 5, 2, 1, 3, 0.2, 2, 0, 0], 1, (n_samples, 14))
-        X_prone = rng.normal([4, 2, 6, 2, 4, 4, 2, 1, 0.5, 4, 0.15, 1.5, 0, 0], 1, (n_samples, 14))
+        # Synthetic feature distributions per pose (14 features each).
+        # Columns match FEATURE_NAMES order.
+        pose_profiles = {
+            # STANDING: strong upright signal, moderate variance
+            0: [10, 2, 12, 6, 6, 5, 3, 1, 0.5, 2, 0.1, 1, 0, 0],
+            # CROUCHING: lower magnitude, higher variance (compressed body)
+            1: [7, 3, 10, 4, 6, 8, 5, 2, 1.0, 3, 0.2, 2, 0, 0],
+            # PRONE: low magnitude, spread features (body parallel to ground)
+            2: [4, 2, 6, 2, 4, 4, 2, 1, 0.5, 4, 0.15, 1.5, 0, 0],
+        }
 
-        X = np.vstack([X_standing, X_crouching, X_prone])
-        y = np.array([0] * n_samples + [1] * n_samples + [2] * n_samples)
+        X_parts, y_parts = [], []
+        for label, means in pose_profiles.items():
+            X_parts.append(rng.normal(means, 1.0, (n_samples, 14)))
+            y_parts.append(np.full(n_samples, label))
 
-        clf.fit(X, y)
-        return clf
+        X = np.vstack(X_parts)
+        y = np.concatenate(y_parts)
+
+        # Production architecture: RandomForest with StandardScaler pipeline
+        pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            ("classifier", RandomForestClassifier(
+                n_estimators=100,
+                max_depth=10,
+                min_samples_leaf=5,
+                random_state=42,
+                n_jobs=-1,
+            )),
+        ])
+        pipeline.fit(X, y)
+        return pipeline
 
     def predict(self, X_window: np.ndarray) -> Tuple[str, float]:
         """Predict pose label and confidence.
