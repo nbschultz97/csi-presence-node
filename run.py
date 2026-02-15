@@ -54,6 +54,11 @@ def main():
         action="store_true",
         help="Run guided setup wizard (recommended for first-time setup)",
     )
+    mode_group.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="Launch web dashboard (http://localhost:8088)",
+    )
 
     # Pipeline arguments (when not in special mode)
     parser.add_argument("--pose", action="store_true", help="Enable pose classifier")
@@ -65,6 +70,7 @@ def main():
     parser.add_argument("--speed", type=float, default=1.0, help="Replay speed factor")
     parser.add_argument("--log", type=str, default=None, help="Override input log path")
     parser.add_argument("--config", "-c", type=str, default=None, help="Config file path")
+    parser.add_argument("--port", type=int, default=8088, help="Dashboard HTTP port")
 
     args = parser.parse_args()
 
@@ -89,6 +95,16 @@ def main():
     if args.setup:
         from csi_node.setup_wizard import main as setup_main
         setup_main()
+        return
+
+    if args.dashboard:
+        from csi_node.web_dashboard import run_dashboard
+        run_dashboard(
+            port=args.port,
+            replay_path=args.replay,
+            log_path=args.log,
+            speed=args.speed,
+        )
         return
 
     # Normal pipeline mode
