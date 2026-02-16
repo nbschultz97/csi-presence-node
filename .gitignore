@@ -3,6 +3,8 @@ __pycache__/
 *.pyo
 *.egg-info/
 data/
+!data/demo_csi.log
+!data/sample_csi.b64
 models/*.joblib
 FeitCSI-iwlwifi/
 csi-presence-node/
