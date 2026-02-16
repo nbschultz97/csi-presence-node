@@ -41,6 +41,7 @@ _dashboard_state = {
     "log": [],
     "started": False,
     "error": None,
+    "simulate": False,
 }
 _state_lock = threading.Lock()
 _detector: Optional[AdaptivePresenceDetector] = None
@@ -97,6 +98,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .movement-breathing { background: rgba(163,113,247,0.2); color: #a371f7; }
   .calibration-banner { background: rgba(210,153,34,0.15); border: 1px solid #9e6a03; border-radius: 8px;
     padding: 12px 16px; margin: 16px; text-align: center; color: #d29922; display: none; }
+  .sim-banner { background: rgba(88,166,255,0.1); border: 1px solid #1f6feb; border-radius: 8px;
+    padding: 10px 16px; margin: 16px 16px 0; text-align: center; color: #58a6ff; font-size: 0.85rem; }
   .btn { background: #238636; color: white; border: none; padding: 8px 16px; border-radius: 6px;
     cursor: pointer; font-size: 0.85rem; font-weight: 500; }
   .btn:hover { background: #2ea043; }
@@ -399,6 +402,7 @@ def _pipeline_thread(
     log_path: Optional[str] = None,
     speed: float = 1.0,
     auto_calibrate: bool = True,
+    simulate: bool = False,
 ):
     """Run the CSI pipeline and feed the detector."""
     global _detector
@@ -472,7 +476,15 @@ def _pipeline_thread(
                     })
 
     try:
-        if replay_path:
+        if simulate:
+            from .simulator import CSISimulator
+            print("[dashboard] Running in SIMULATION mode — synthetic CSI data", file=sys.stderr)
+            with _state_lock:
+                _dashboard_state['simulate'] = True
+            sim = CSISimulator()
+            for pkt in sim.stream(loop=True, realtime=True):
+                process_packet(pkt)
+        elif replay_path:
             print(f"[dashboard] Replaying {replay_path} at {speed}x", file=sys.stderr)
             for pkt in replay_mod.replay(replay_path, speed):
                 process_packet(pkt)
@@ -521,12 +533,13 @@ def run_dashboard(
     replay_path: Optional[str] = None,
     log_path: Optional[str] = None,
     speed: float = 1.0,
+    simulate: bool = False,
 ):
     """Start the web dashboard with pipeline."""
     # Start pipeline in background
     t = threading.Thread(
         target=_pipeline_thread,
-        args=(replay_path, log_path, speed),
+        args=(replay_path, log_path, speed, True, simulate),
         daemon=True,
     )
     t.start()
@@ -547,6 +560,7 @@ def main():
     parser.add_argument('--replay', type=str, default=None, help='Replay a capture file')
     parser.add_argument('--log', type=str, default=None, help='Tail a CSI log file')
     parser.add_argument('--speed', type=float, default=1.0, help='Replay speed')
+    parser.add_argument('--simulate', action='store_true', help='Use synthetic CSI data (no hardware needed)')
     args = parser.parse_args()
 
     run_dashboard(
@@ -554,6 +568,7 @@ def main():
         replay_path=args.replay,
         log_path=args.log,
         speed=args.speed,
+        simulate=args.simulate,
     )
 
 

@@ -59,6 +59,11 @@ def main():
         action="store_true",
         help="Launch web dashboard (http://localhost:8088)",
     )
+    mode_group.add_argument(
+        "--demo",
+        action="store_true",
+        help="Launch demo mode — simulated CSI data + web dashboard (no hardware needed)",
+    )
 
     # Pipeline arguments (when not in special mode)
     parser.add_argument("--pose", action="store_true", help="Enable pose classifier")
@@ -95,6 +100,15 @@ def main():
     if args.setup:
         from csi_node.setup_wizard import main as setup_main
         setup_main()
+        return
+
+    if args.demo:
+        from csi_node.web_dashboard import run_dashboard
+        print("\n  🎯 VANTAGE DEMO MODE")
+        print("  Generating synthetic CSI data — no hardware required.")
+        print("  Scenarios: empty room → person enters → movement → breathing → exits")
+        print(f"  Dashboard: http://localhost:{args.port}\n")
+        run_dashboard(port=args.port, simulate=True)
         return
 
     if args.dashboard:
