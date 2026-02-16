@@ -22,9 +22,15 @@ bash scripts/00_install_deps.sh
 
 ### 2. Launch the Web Dashboard
 
-**Replay mode (no hardware needed — great for showing the UI):**
+**🎯 Demo mode (no hardware needed — recommended for first demo):**
 ```bash
-python run.py --dashboard --replay data/sample_csi.b64
+python run.py --demo
+```
+This generates synthetic CSI data with realistic scenarios: empty room → person enters → movement → breathing → exits. Loops automatically.
+
+**Replay mode (using recorded data):**
+```bash
+python run.py --dashboard --replay data/demo_csi.log
 ```
 
 **Live mode (with FeitCSI-compatible WiFi adapter):**
