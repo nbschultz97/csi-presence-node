@@ -33,6 +33,7 @@ def test_run_offline_missing_file(tmp_path):
 def test_pipeline_run_missing_file(tmp_path, capsys):
     cfg = yaml.safe_load(open("csi_node/config.yaml"))
     cfg["log_file"] = str(tmp_path / "missing.log")
+    cfg["output_file"] = str(tmp_path / "output" / "presence_log.jsonl")
     cfg["log_wait"] = 0
     cfg_path = tmp_path / "cfg.yaml"
     with open(cfg_path, "w") as f:
@@ -47,6 +48,7 @@ def test_pipeline_run_missing_file(tmp_path, capsys):
 def test_pipeline_run_missing_file_after_wait(tmp_path, monkeypatch, capsys):
     cfg = yaml.safe_load(open("csi_node/config.yaml"))
     cfg["log_file"] = str(tmp_path / "missing.log")
+    cfg["output_file"] = str(tmp_path / "output" / "presence_log.jsonl")
     cfg["log_wait"] = 0
 
     # Force pipeline.run to proceed without the log existing
@@ -83,6 +85,7 @@ def test_pipeline_run_stale_file(tmp_path, capsys):
     os.utime(log, (old, old))
     cfg = yaml.safe_load(open("csi_node/config.yaml"))
     cfg["log_file"] = str(log)
+    cfg["output_file"] = str(tmp_path / "output" / "presence_log.jsonl")
     cfg["log_wait"] = 0
     cfg_path = tmp_path / "cfg.yaml"
     with open(cfg_path, "w") as f:
