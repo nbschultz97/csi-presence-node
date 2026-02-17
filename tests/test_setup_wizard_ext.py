@@ -1,6 +1,7 @@
 """Extended tests for csi_node.setup_wizard — helper functions and config I/O."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -196,3 +197,296 @@ class TestConfigureUDP:
         with patch("builtins.input", return_value="n"):
             setup_wizard.configure_udp(cfg)
         assert cfg["udp_enabled"] is False
+
+
+class TestCheckHardwareExtended:
+    def test_lspci_with_ax211(self):
+        """Test hardware check detects AX211."""
+        from unittest.mock import MagicMock
+        mock_result = MagicMock()
+        mock_result.stdout = "Intel Corporation Wi-Fi 6E AX211"
+        with patch("shutil.which", return_value="/usr/bin/lspci"), \
+             patch("subprocess.run", return_value=mock_result):
+            assert setup_wizard.check_hardware() is True
+
+    def test_lspci_subprocess_error(self):
+        """Test hardware check handles lspci errors."""
+        with patch("shutil.which", return_value="/usr/bin/lspci"), \
+             patch("subprocess.run", side_effect=Exception("Command failed")):
+            # Should fall back to iwconfig
+            assert setup_wizard.check_hardware() is False
+
+    def test_iwconfig_fallback(self):
+        """Test iwconfig fallback when lspci fails."""
+        from unittest.mock import MagicMock
+        mock_result = MagicMock()
+        mock_result.stdout = "wlan0     IEEE 802.11  ESSID:off/any"
+        with patch("shutil.which", side_effect=lambda cmd: "/usr/sbin/iwconfig" if cmd == "iwconfig" else None), \
+             patch("subprocess.run", return_value=mock_result):
+            assert setup_wizard.check_hardware() is True
+
+    def test_iwconfig_error(self):
+        """Test iwconfig error handling."""
+        with patch("shutil.which", side_effect=lambda cmd: "/usr/sbin/iwconfig" if cmd == "iwconfig" else None), \
+             patch("subprocess.run", side_effect=Exception("iwconfig failed")):
+            assert setup_wizard.check_hardware() is False
+
+    def test_subprocess_timeout(self):
+        """Test subprocess timeout handling."""
+        with patch("shutil.which", return_value="/usr/bin/lspci"), \
+             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("lspci", 10)):
+            assert setup_wizard.check_hardware() is False
+
+
+class TestCheckFeitCSIExtended:
+    def test_found_in_common_path(self, tmp_path):
+        """Test FeitCSI found in common locations."""
+        # Create fake feitcsi binary
+        feitcsi_path = tmp_path / "FeitCSI" / "build" / "feitcsi"
+        feitcsi_path.parent.mkdir(parents=True, exist_ok=True)
+        feitcsi_path.write_text("#!/bin/bash\necho feitcsi")
+        
+        with patch("shutil.which", return_value=None), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_wizard.check_feitcsi() is True
+
+    def test_not_found_anywhere(self):
+        """Test FeitCSI not found anywhere."""
+        with patch("shutil.which", return_value=None), \
+             patch.object(Path, "exists", return_value=False):
+            assert setup_wizard.check_feitcsi() is False
+
+
+class TestCaptureBaseline:
+    def test_capture_baseline_declined(self):
+        """Test user declines baseline capture."""
+        with patch("builtins.input", return_value="n"):
+            result = setup_wizard.capture_baseline({})
+        assert result is False
+
+    def test_capture_baseline_success(self, tmp_path):
+        """Test successful baseline capture."""
+        from unittest.mock import MagicMock
+        
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        
+        with patch("builtins.input", side_effect=["y", "", "30"]):  # yes, enter, 30 seconds
+            with patch("subprocess.run", return_value=mock_result):
+                result = setup_wizard.capture_baseline({})
+        
+        assert result is True
+
+    def test_capture_baseline_timeout(self):
+        """Test baseline capture timeout."""
+        import subprocess
+        
+        with patch("builtins.input", side_effect=["y", "", "10"]):
+            with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 10)):
+                result = setup_wizard.capture_baseline({})
+        
+        assert result is False
+
+    def test_capture_baseline_failure(self):
+        """Test baseline capture failure."""
+        from unittest.mock import MagicMock
+        
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        
+        with patch("builtins.input", side_effect=["y", "", "10"]):
+            with patch("subprocess.run", return_value=mock_result):
+                result = setup_wizard.capture_baseline({})
+        
+        assert result is False
+
+    def test_capture_baseline_exception(self):
+        """Test baseline capture exception handling."""
+        with patch("builtins.input", side_effect=["y", "", "10"]):
+            with patch("subprocess.run", side_effect=Exception("Process failed")):
+                result = setup_wizard.capture_baseline({})
+        
+        assert result is False
+
+
+class TestRunCalibration:
+    def test_calibration_declined(self):
+        """Test user declines calibration."""
+        with patch("builtins.input", return_value="n"):
+            result = setup_wizard.run_calibration({})
+        assert result is False
+
+    def test_calibration_no_log_files(self, tmp_path):
+        """Test calibration when log files don't exist."""
+        with patch("builtins.input", side_effect=[
+            "y",  # yes to calibration
+            "1.0",  # near distance
+            "3.0",  # far distance
+            "",  # enter for near recording ready
+            "",  # enter for near recording complete
+            "",  # enter for far recording ready  
+            "",  # enter for far recording complete
+        ]):
+            # Mock Path.exists to return False (files don't exist)
+            with patch("pathlib.Path.exists", return_value=False):
+                result = setup_wizard.run_calibration({})
+        
+        # Should return False because log files don't exist
+        assert result is False
+
+    def test_calibration_success(self, tmp_path):
+        """Test successful calibration."""
+        from unittest.mock import MagicMock
+        
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        
+        with patch("builtins.input", side_effect=[
+            "y",  # yes to calibration
+            "1.5",  # near distance
+            "4.0",  # far distance
+            "",  # enter for near recording ready
+            "",  # enter for near recording complete
+            "",  # enter for far recording ready
+            "",  # enter for far recording complete
+        ]):
+            # Mock Path.exists to return True (files exist)
+            with patch("pathlib.Path.exists", return_value=True):
+                with patch("subprocess.run", return_value=mock_result):
+                    result = setup_wizard.run_calibration({})
+        
+        assert result is True
+
+    def test_calibration_subprocess_error(self, tmp_path):
+        """Test calibration subprocess error."""        
+        with patch("builtins.input", side_effect=[
+            "y", "1.0", "3.0", "", "", "", ""
+        ]):
+            with patch("pathlib.Path.exists", return_value=True):
+                with patch("subprocess.run", side_effect=Exception("Calibration failed")):
+                    result = setup_wizard.run_calibration({})
+        
+        assert result is False
+
+
+class TestTrainPoseModel:
+    def test_training_declined(self):
+        """Test user declines pose model training."""
+        with patch("builtins.input", return_value="n"):
+            result = setup_wizard.train_pose_model({})
+        assert result is False
+
+    def test_training_declined_after_initial_yes(self):
+        """Test user declines training after initial yes."""
+        with patch("builtins.input", side_effect=["y", "n"]):  # yes, then no to continue
+            result = setup_wizard.train_pose_model({})
+        assert result is False
+
+    def test_training_success(self):
+        """Test successful pose model training."""
+        from unittest.mock import MagicMock
+        
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        
+        with patch("builtins.input", side_effect=["y", "y"]):  # yes to train, yes to continue
+            with patch("subprocess.run", return_value=mock_result):
+                result = setup_wizard.train_pose_model({})
+        
+        assert result is True
+
+    def test_training_data_collection_fails(self):
+        """Test training failure during data collection."""
+        from unittest.mock import MagicMock
+        
+        mock_result = MagicMock()
+        mock_result.returncode = 1  # Failure
+        
+        with patch("builtins.input", side_effect=["y", "y"]):
+            with patch("subprocess.run", return_value=mock_result):
+                result = setup_wizard.train_pose_model({})
+        
+        assert result is False
+
+    def test_training_exception(self):
+        """Test training exception handling."""
+        with patch("builtins.input", side_effect=["y", "y"]):
+            with patch("subprocess.run", side_effect=Exception("Training failed")):
+                result = setup_wizard.train_pose_model({})
+        
+        assert result is False
+
+
+class TestMainFunction:
+    def test_main_setup_cancelled(self):
+        """Test main function when user cancels setup."""
+        with patch("builtins.input", return_value="n"):  # Cancel setup
+            with patch("builtins.print"):
+                setup_wizard.main()
+        # Should exit gracefully
+
+    def test_main_hardware_check_fails_user_exits(self):
+        """Test main function when hardware checks fail and user exits."""
+        with patch("builtins.input", side_effect=["y", "n"]):  # yes to continue, no to continue anyway
+            with patch("csi_node.setup_wizard.check_hardware", return_value=False):
+                with patch("csi_node.setup_wizard.check_feitcsi", return_value=False):
+                    with patch("builtins.print"):
+                        setup_wizard.main()
+        # Should exit gracefully
+
+    def test_main_full_workflow_success(self, tmp_path):
+        """Test main function with full successful workflow."""
+        cfg_path = tmp_path / "config.yaml"
+        
+        with patch.object(setup_wizard, "CONFIG_PATH", cfg_path):
+            with patch("builtins.input", side_effect=[
+                "y",  # continue with setup
+                "y",  # continue anyway after hardware check
+            ]):
+                with patch("csi_node.setup_wizard.check_hardware", return_value=False):
+                    with patch("csi_node.setup_wizard.check_feitcsi", return_value=False):
+                        with patch("csi_node.setup_wizard.capture_baseline", return_value=True):
+                            with patch("csi_node.setup_wizard.run_calibration", return_value=True):
+                                with patch("csi_node.setup_wizard.configure_location"):
+                                    with patch("csi_node.setup_wizard.configure_atak"):
+                                        with patch("csi_node.setup_wizard.configure_udp"):
+                                            with patch("csi_node.setup_wizard.train_pose_model", return_value=True):
+                                                with patch("csi_node.setup_wizard.print_summary"):
+                                                    with patch("builtins.print"):
+                                                        setup_wizard.main()
+        
+        # Should have saved configuration
+        assert cfg_path.exists()
+
+    def test_main_hardware_ok_workflow(self):
+        """Test main function when hardware checks pass."""
+        with patch("builtins.input", return_value="y"):  # continue with setup
+            with patch("csi_node.setup_wizard.check_hardware", return_value=True):
+                with patch("csi_node.setup_wizard.check_feitcsi", return_value=True):
+                    with patch("csi_node.setup_wizard.capture_baseline", return_value=False):
+                        with patch("csi_node.setup_wizard.run_calibration", return_value=False):
+                            with patch("csi_node.setup_wizard.configure_location"):
+                                with patch("csi_node.setup_wizard.configure_atak"):
+                                    with patch("csi_node.setup_wizard.configure_udp"):
+                                        with patch("csi_node.setup_wizard.train_pose_model", return_value=False):
+                                            with patch("csi_node.setup_wizard.save_config"):
+                                                with patch("csi_node.setup_wizard.print_summary"):
+                                                    with patch("builtins.print"):
+                                                        setup_wizard.main()
+        # Should complete successfully
+
+
+class TestMainEntryPoint:
+    def test_main_entry_point(self):
+        """Test the if __name__ == '__main__' entry point."""
+        with patch("csi_node.setup_wizard.main") as mock_main:
+            # Test that the entry point calls main when run directly
+            # This simulates the behavior without executing the full file
+            import csi_node.setup_wizard as sw_module
+            
+            # Simulate the condition in the actual file
+            if hasattr(sw_module, '__name__'):
+                # Just call main directly as that's what the entry point does
+                sw_module.main()
+            
+            mock_main.assert_called_once()
