@@ -179,6 +179,23 @@ class AdaptivePresenceDetector:
         self._calibrating = True
         self._cal_samples = []
 
+    def set_profile(self, profile: dict) -> None:
+        """Apply a detection profile (through_wall, same_room, etc.)."""
+        for key, value in profile.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
+    def get_subcarrier_variance(self) -> list[float]:
+        """Return per-subcarrier variance from recent frames (for heatmap)."""
+        if len(self._frame_buffer) < 5:
+            return []
+        window = np.array(list(self._frame_buffer)[-30:])
+        if window.ndim < 2:
+            return []
+        var = np.var(window, axis=0)
+        max_var = np.max(var) if np.max(var) > 0 else 1.0
+        return (var / max_var).tolist()
+
     def save_calibration(self, path: str | Path) -> None:
         """Save calibration to file."""
         data = {

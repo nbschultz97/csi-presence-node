@@ -149,7 +149,7 @@ class TestDashboardHTML:
         assert '<canvas id="chart"' in DASHBOARD_HTML
 
     def test_has_polling_script(self):
-        assert "poll()" in DASHBOARD_HTML
+        assert "pollFallback()" in DASHBOARD_HTML or "poll()" in DASHBOARD_HTML
         assert "fetch('/api/state')" in DASHBOARD_HTML
 
     def test_has_calibration_button(self):

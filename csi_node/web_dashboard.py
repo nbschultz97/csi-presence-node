@@ -1,6 +1,7 @@
 """Web-based real-time dashboard for Vantage CSI presence detection.
 
 Provides a browser-based visualization that works on any platform.
+Uses Server-Sent Events (SSE) for real-time streaming updates.
 No dependencies beyond the Python standard library + the existing stack.
 
 Usage:
@@ -42,12 +43,26 @@ _dashboard_state = {
     "started": False,
     "error": None,
     "simulate": False,
+    "recording": False,
+    "record_count": 0,
+    "calibration_progress": 0.0,
+    "zone_heatmap": [],
 }
 _state_lock = threading.Lock()
 _detector: Optional[AdaptivePresenceDetector] = None
 
 # Store raw JSONL entries for the log panel
 _log_entries: deque = deque(maxlen=200)
+
+# SSE clients
+_sse_clients: list = []
+_sse_lock = threading.Lock()
+
+# Recording state
+_recording = False
+_record_file = None
+_record_count = 0
+_record_label = "unknown"
 
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -63,7 +78,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 16px; }
   .header h1 { font-size: 1.4rem; font-weight: 600; }
   .header h1 span { color: #58a6ff; }
-  .header .status { margin-left: auto; font-size: 0.85rem; color: #8b949e; }
+  .header .badges { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .badge { font-size: 0.75rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
+  .badge-live { background: rgba(35,134,54,0.2); color: #3fb950; border: 1px solid #238636; }
+  .badge-sim { background: rgba(88,166,255,0.1); color: #58a6ff; border: 1px solid #1f6feb; }
+  .badge-rec { background: rgba(218,54,51,0.2); color: #f85149; border: 1px solid #da3633; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: 0.5; } }
+  .header .status { font-size: 0.8rem; color: #8b949e; }
+  .toolbar { background: #161b22; border-bottom: 1px solid #21262d; padding: 8px 24px; display: flex; gap: 8px; align-items: center; }
   .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; padding: 16px; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; }
   .card h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; color: #8b949e; margin-bottom: 12px; }
@@ -86,37 +108,78 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chart-area { position: relative; }
   canvas { width: 100%; height: 180px; display: block; }
   .full-width { grid-column: 1 / -1; }
+  .two-thirds { grid-column: span 2; }
   .log-area { max-height: 220px; overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace;
     font-size: 0.78rem; line-height: 1.5; background: #0d1117; border-radius: 8px; padding: 8px; }
   .log-line { white-space: nowrap; }
   .log-line.present { color: #f85149; }
   .log-line.clear { color: #3fb950; }
-  .movement-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;
-    font-weight: 600; margin-left: 8px; }
+  .movement-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-left: 8px; }
   .movement-moving { background: rgba(218,54,51,0.2); color: #f85149; }
   .movement-stationary { background: rgba(56,139,253,0.2); color: #58a6ff; }
   .movement-breathing { background: rgba(163,113,247,0.2); color: #a371f7; }
   .calibration-banner { background: rgba(210,153,34,0.15); border: 1px solid #9e6a03; border-radius: 8px;
     padding: 12px 16px; margin: 16px; text-align: center; color: #d29922; display: none; }
-  .sim-banner { background: rgba(88,166,255,0.1); border: 1px solid #1f6feb; border-radius: 8px;
-    padding: 10px 16px; margin: 16px 16px 0; text-align: center; color: #58a6ff; font-size: 0.85rem; }
-  .btn { background: #238636; color: white; border: none; padding: 8px 16px; border-radius: 6px;
-    cursor: pointer; font-size: 0.85rem; font-weight: 500; }
+  .cal-progress { height: 4px; background: #21262d; border-radius: 2px; margin-top: 8px; overflow: hidden; }
+  .cal-progress-fill { height: 100%; background: #d29922; border-radius: 2px; transition: width 0.5s; width: 0%; }
+  .btn { background: #238636; color: white; border: none; padding: 6px 14px; border-radius: 6px;
+    cursor: pointer; font-size: 0.8rem; font-weight: 500; }
   .btn:hover { background: #2ea043; }
   .btn-outline { background: transparent; border: 1px solid #30363d; color: #c9d1d9; }
   .btn-outline:hover { background: #21262d; }
+  .btn-danger { background: #da3633; }
+  .btn-danger:hover { background: #f85149; }
+  .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+  /* Subcarrier heatmap */
+  .heatmap-container { display: flex; gap: 1px; align-items: flex-end; height: 80px; background: #0d1117; border-radius: 8px; padding: 8px; overflow: hidden; }
+  .heatmap-bar { flex: 1; min-width: 2px; border-radius: 1px 1px 0 0; transition: height 0.3s, background 0.3s; }
+  /* Zone visualization */
+  .zone-viz { position: relative; background: #0d1117; border-radius: 8px; height: 200px; overflow: hidden; }
+  .zone-sensor { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+    width: 36px; height: 36px; background: #238636; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; font-size: 14px; z-index: 2; border: 2px solid #3fb950; }
+  .zone-wall { position: absolute; top: 50%; left: 0; right: 0; height: 4px; background: #8b949e;
+    transform: translateY(-50%); z-index: 1; }
+  .zone-wall-label { position: absolute; top: 50%; right: 8px; transform: translateY(-50%);
+    font-size: 0.65rem; color: #8b949e; z-index: 2; background: #0d1117; padding: 0 4px; }
+  .zone-target { position: absolute; width: 28px; height: 28px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; font-size: 12px; transition: all 0.5s ease;
+    z-index: 3; }
+  .zone-target.active { background: rgba(218,54,51,0.3); border: 2px solid #f85149; }
+  .zone-target.inactive { background: rgba(33,38,45,0.5); border: 2px dashed #30363d; opacity: 0.3; }
+  .zone-cone { position: absolute; bottom: 38px; left: 50%; transform-origin: bottom center;
+    width: 0; height: 0; opacity: 0.1; z-index: 0; }
+  /* Uptime counter */
+  .uptime { font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>🎯 <span>VANTAGE</span> — Through-Wall Presence Detection</h1>
+  <div class="badges">
+    <span class="badge badge-live" id="badge-live" style="display:none">● LIVE</span>
+    <span class="badge badge-sim" id="badge-sim" style="display:none">◉ SIMULATION</span>
+    <span class="badge badge-rec" id="badge-rec" style="display:none">⏺ REC</span>
+  </div>
   <div class="status" id="conn-status">Connecting...</div>
+</div>
+
+<div class="toolbar" id="toolbar">
+  <button class="btn btn-sm" onclick="startCalibration()">📐 Calibrate</button>
+  <button class="btn btn-sm btn-outline" onclick="toggleRecording()" id="rec-btn">⏺ Record Data</button>
+  <select class="btn btn-sm btn-outline" onchange="setProfile(this.value)" id="profile-select" style="appearance:auto">
+    <option value="default">Profile: Default</option>
+    <option value="through_wall">Profile: Through-Wall</option>
+    <option value="same_room">Profile: Same Room</option>
+    <option value="high_sensitivity">Profile: High Sensitivity</option>
+  </select>
+  <span style="margin-left:auto;font-size:0.75rem;color:#8b949e" class="uptime" id="uptime">00:00:00</span>
 </div>
 
 <div class="calibration-banner" id="cal-banner">
   ⚠️ Not calibrated — detection uses adaptive thresholds. For best results, run calibration in an empty room.
-  <button class="btn" onclick="startCalibration()" style="margin-left:12px">Calibrate Now (30s)</button>
+  <div class="cal-progress" id="cal-progress" style="display:none"><div class="cal-progress-fill" id="cal-fill"></div></div>
 </div>
 
 <div class="grid">
@@ -150,6 +213,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="value" id="m-pps">0</div>
       </div>
     </div>
+  </div>
+
+  <!-- Zone visualization -->
+  <div class="card">
+    <h2>Spatial View</h2>
+    <div class="zone-viz" id="zone-viz">
+      <div class="zone-wall"></div>
+      <div class="zone-wall-label">WALL</div>
+      <div class="zone-sensor">📡</div>
+      <div class="zone-target inactive" id="zone-target" style="top:25%;left:50%;transform:translate(-50%,-50%)">🚶</div>
+    </div>
+  </div>
+
+  <!-- Subcarrier heatmap -->
+  <div class="card two-thirds">
+    <h2>Subcarrier Energy Heatmap</h2>
+    <div class="heatmap-container" id="heatmap"></div>
   </div>
 
   <!-- Movement & Direction -->
@@ -189,10 +269,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
-const POLL_MS = 500;
-let chart, ctx;
-let histData = { confidence: [], energy: [], variance: [] };
+let ctx;
+let histData = { confidence: [], energy: [], variance: [], spectral: [] };
 const MAX_POINTS = 120;
+let startTime = Date.now();
+let evtSource = null;
+let heatmapBars = [];
+let logCount = 0;
 
 function initChart() {
   const c = document.getElementById('chart');
@@ -201,54 +284,102 @@ function initChart() {
   ctx = c.getContext('2d');
 }
 
+function initHeatmap() {
+  const container = document.getElementById('heatmap');
+  container.innerHTML = '';
+  heatmapBars = [];
+  for (let i = 0; i < 52; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'heatmap-bar';
+    bar.style.height = '4px';
+    bar.style.background = '#21262d';
+    container.appendChild(bar);
+    heatmapBars.push(bar);
+  }
+}
+
+function updateHeatmap(zones) {
+  if (!zones || !zones.length) return;
+  const n = Math.min(zones.length, heatmapBars.length);
+  for (let i = 0; i < n; i++) {
+    const v = Math.min(zones[i], 1.0);
+    const h = Math.max(4, v * 72);
+    heatmapBars[i].style.height = h + 'px';
+    if (v > 0.7) heatmapBars[i].style.background = '#f85149';
+    else if (v > 0.4) heatmapBars[i].style.background = '#d29922';
+    else if (v > 0.15) heatmapBars[i].style.background = '#58a6ff';
+    else heatmapBars[i].style.background = '#21262d';
+  }
+}
+
 function drawChart() {
   if (!ctx) return;
   const W = ctx.canvas.width, H = ctx.canvas.height;
   ctx.clearRect(0, 0, W, H);
-
-  // Grid
-  ctx.strokeStyle = '#21262d';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
   for (let y = 0; y <= 1; y += 0.25) {
     const py = H - y * H;
     ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(W, py); ctx.stroke();
   }
-
-  // Threshold line
-  ctx.strokeStyle = '#da363388';
-  ctx.setLineDash([6,4]);
-  const ty = H - 0.5 * H;
-  ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(W, ty); ctx.stroke();
+  ctx.strokeStyle = '#da363388'; ctx.setLineDash([6,4]);
+  ctx.beginPath(); ctx.moveTo(0, H*0.5); ctx.lineTo(W, H*0.5); ctx.stroke();
   ctx.setLineDash([]);
 
-  function drawLine(data, color) {
+  function drawLine(data, color, alpha) {
     if (data.length < 2) return;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.globalAlpha = alpha || 1;
     ctx.beginPath();
     for (let i = 0; i < data.length; i++) {
       const x = (i / (MAX_POINTS - 1)) * W;
       const y = H - Math.min(data[i], 1.5) / 1.5 * H;
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
-    ctx.stroke();
+    ctx.stroke(); ctx.globalAlpha = 1;
   }
-
+  // Fill under confidence
+  if (histData.confidence.length > 1) {
+    ctx.fillStyle = 'rgba(88,166,255,0.08)';
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let i = 0; i < histData.confidence.length; i++) {
+      const x = (i / (MAX_POINTS - 1)) * W;
+      const y = H - Math.min(histData.confidence[i], 1.5) / 1.5 * H;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(((histData.confidence.length-1) / (MAX_POINTS-1)) * W, H);
+    ctx.fill();
+  }
   drawLine(histData.confidence, '#58a6ff');
-  drawLine(histData.energy, '#3fb950');
-  drawLine(histData.variance, '#d29922');
+  drawLine(histData.energy, '#3fb950', 0.7);
+  drawLine(histData.variance, '#d29922', 0.7);
+  drawLine(histData.spectral, '#a371f7', 0.5);
 
-  // Legend
   ctx.font = '20px sans-serif';
-  const items = [['Confidence','#58a6ff'],['Energy','#3fb950'],['Variance','#d29922']];
+  const items = [['Confidence','#58a6ff'],['Energy','#3fb950'],['Variance','#d29922'],['Spectral','#a371f7']];
   let lx = 10;
   items.forEach(([label, color]) => {
-    ctx.fillStyle = color;
-    ctx.fillRect(lx, 8, 16, 16);
-    ctx.fillStyle = '#8b949e';
-    ctx.fillText(label, lx + 22, 22);
+    ctx.fillStyle = color; ctx.fillRect(lx, 8, 16, 16);
+    ctx.fillStyle = '#8b949e'; ctx.fillText(label, lx + 22, 22);
     lx += ctx.measureText(label).width + 40;
   });
+}
+
+function updateZoneViz(c) {
+  const tgt = document.getElementById('zone-target');
+  if (c.present) {
+    tgt.className = 'zone-target active';
+    let leftPct = 50;
+    if (c.direction === 'left') leftPct = 30;
+    else if (c.direction === 'right') leftPct = 70;
+    let topPct = 25 - Math.min(c.confidence, 1) * 5;
+    tgt.style.left = leftPct + '%';
+    tgt.style.top = topPct + '%';
+    tgt.textContent = c.movement === 'moving' ? '🏃' : c.movement === 'breathing' ? '🧘' : '🚶';
+  } else {
+    tgt.className = 'zone-target inactive';
+    tgt.textContent = '🚶';
+    tgt.style.left = '50%'; tgt.style.top = '25%';
+  }
 }
 
 function updateUI(data) {
@@ -275,76 +406,168 @@ function updateUI(data) {
   document.getElementById('m-variance').textContent = c.variance_ratio.toFixed(2);
   document.getElementById('m-spectral').textContent = c.spectral_ratio.toFixed(2);
   document.getElementById('m-pps').textContent = Math.round(c.packets_per_sec);
-  document.getElementById('m-movement').textContent = c.movement.toUpperCase() || '—';
+  document.getElementById('m-movement').textContent = (c.movement || 'none').toUpperCase();
   document.getElementById('m-intensity').textContent = c.movement_intensity.toFixed(2);
-  document.getElementById('m-direction').textContent = c.direction.toUpperCase();
+  document.getElementById('m-direction').textContent = (c.direction || 'center').toUpperCase();
   document.getElementById('m-distance').textContent = c.distance_m > 0 ? c.distance_m.toFixed(1) + 'm' : '—';
 
   document.getElementById('cal-banner').style.display = c.calibrated ? 'none' : 'block';
+  updateZoneViz(c);
 
-  // Update history chart
+  // Badges
+  document.getElementById('badge-sim').style.display = data.simulate ? '' : 'none';
+  document.getElementById('badge-live').style.display = data.simulate ? 'none' : '';
+  document.getElementById('badge-rec').style.display = data.recording ? '' : 'none';
+
+  // Calibration progress
+  if (data.calibration_progress > 0 && data.calibration_progress < 1) {
+    document.getElementById('cal-progress').style.display = '';
+    document.getElementById('cal-fill').style.width = (data.calibration_progress * 100) + '%';
+    document.getElementById('cal-banner').style.display = '';
+    document.getElementById('cal-banner').firstChild.textContent =
+      '⏳ Calibrating... ' + Math.round(data.calibration_progress * 100) + '% — ensure room is empty';
+  } else {
+    document.getElementById('cal-progress').style.display = 'none';
+  }
+
+  // Heatmap
+  if (data.zone_heatmap) updateHeatmap(data.zone_heatmap);
+
+  // History
   const h = data.history;
   if (h && h.confidence) {
     histData.confidence = h.confidence.slice(-MAX_POINTS);
     histData.energy = h.energy_ratio.slice(-MAX_POINTS);
     histData.variance = h.variance_ratio.slice(-MAX_POINTS);
+    histData.spectral = (h.spectral_ratio || []).slice(-MAX_POINTS);
   }
   drawChart();
 
-  // Update log
-  if (data.log && data.log.length) {
-    const area = document.getElementById('log-area');
-    const atBottom = area.scrollTop >= area.scrollHeight - area.clientHeight - 40;
-    // Only add new entries
-    const existing = area.children.length;
-    for (let i = existing; i < data.log.length; i++) {
-      const e = data.log[i];
-      const div = document.createElement('div');
-      div.className = 'log-line ' + (e.presence ? 'present' : 'clear');
-      let text = e.timestamp + '  ' + (e.presence ? '🔴 PRESENT' : '🟢 CLEAR');
-      text += '  conf=' + (e.confidence * 100).toFixed(0) + '%';
-      if (e.movement && e.movement !== 'none') text += '  ' + e.movement;
-      if (e.direction && e.direction !== 'center') text += '  dir=' + e.direction;
-      div.textContent = text;
-      area.appendChild(div);
-    }
-    if (atBottom) area.scrollTop = area.scrollHeight;
-  }
-
   document.getElementById('conn-status').textContent =
-    'Live • ' + Math.round(c.packets_per_sec) + ' pkt/s' +
-    (c.calibrated ? ' • Calibrated' : ' • Uncalibrated');
+    Math.round(c.packets_per_sec) + ' pkt/s' +
+    (c.calibrated ? ' • Calibrated' : '');
 }
 
-async function poll() {
+function addLogEntry(e) {
+  const area = document.getElementById('log-area');
+  const atBottom = area.scrollTop >= area.scrollHeight - area.clientHeight - 40;
+  const div = document.createElement('div');
+  div.className = 'log-line ' + (e.presence ? 'present' : 'clear');
+  let text = e.timestamp + '  ' + (e.presence ? '🔴 PRESENT' : '🟢 CLEAR');
+  text += '  conf=' + (e.confidence * 100).toFixed(0) + '%';
+  if (e.movement && e.movement !== 'none') text += '  [' + e.movement + ']';
+  if (e.method && e.method !== 'none') text += '  via:' + e.method;
+  div.textContent = text;
+  area.appendChild(div);
+  // Trim log area to 200 entries
+  while (area.children.length > 200) area.removeChild(area.firstChild);
+  if (atBottom) area.scrollTop = area.scrollHeight;
+}
+
+function connectSSE() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/api/stream');
+  evtSource.onmessage = function(e) {
+    try {
+      const data = JSON.parse(e.data);
+      updateUI(data);
+    } catch(err) {}
+  };
+  evtSource.addEventListener('log', function(e) {
+    try { addLogEntry(JSON.parse(e.data)); } catch(err) {}
+  });
+  evtSource.onerror = function() {
+    document.getElementById('conn-status').textContent = 'Reconnecting...';
+    setTimeout(() => { if (evtSource.readyState === 2) connectSSE(); }, 2000);
+  };
+  evtSource.onopen = function() {
+    document.getElementById('conn-status').textContent = 'Connected';
+  };
+}
+
+// Fallback to polling if SSE not available
+async function pollFallback() {
   try {
     const resp = await fetch('/api/state');
-    if (resp.ok) {
-      const data = await resp.json();
-      updateUI(data);
-    }
-  } catch (e) {
-    document.getElementById('conn-status').textContent = 'Disconnected';
-  }
-  setTimeout(poll, POLL_MS);
+    if (resp.ok) updateUI(await resp.json());
+  } catch(e) {}
+  setTimeout(pollFallback, 500);
 }
 
 async function startCalibration() {
+  try { await fetch('/api/calibrate', { method: 'POST' }); } catch(e) {}
+}
+
+async function toggleRecording() {
   try {
-    await fetch('/api/calibrate', { method: 'POST' });
-    document.getElementById('cal-banner').innerHTML =
-      '⏳ Calibrating... please ensure room is empty. This takes ~30 seconds.';
-  } catch(e) { }
+    const resp = await fetch('/api/record', { method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({label: prompt('Label for recording (e.g. empty, present, walking):', 'present') || 'unknown'})
+    });
+    const d = await resp.json();
+    document.getElementById('rec-btn').textContent = d.recording ? '⏹ Stop Recording' : '⏺ Record Data';
+  } catch(e) {}
+}
+
+async function setProfile(p) {
+  try { await fetch('/api/profile', { method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({profile: p})
+  }); } catch(e) {}
+}
+
+function updateUptime() {
+  const s = Math.floor((Date.now() - startTime) / 1000);
+  const h = String(Math.floor(s/3600)).padStart(2,'0');
+  const m = String(Math.floor((s%3600)/60)).padStart(2,'0');
+  const ss = String(s%60).padStart(2,'0');
+  document.getElementById('uptime').textContent = h+':'+m+':'+ss;
 }
 
 window.addEventListener('load', () => {
-  initChart();
-  window.addEventListener('resize', initChart);
-  poll();
+  initChart(); initHeatmap();
+  window.addEventListener('resize', () => { initChart(); initHeatmap(); });
+  // Try SSE first, fall back to polling
+  if (typeof EventSource !== 'undefined') connectSSE();
+  else pollFallback();
+  setInterval(updateUptime, 1000);
+  setInterval(drawChart, 500);
 });
 </script>
 </body>
 </html>"""
+
+
+DETECTION_PROFILES = {
+    "default": {
+        "energy_threshold_factor": 2.5,
+        "variance_threshold_factor": 3.0,
+        "spectral_threshold_factor": 2.0,
+        "presence_threshold": 0.5,
+        "ema_alpha": 0.3,
+    },
+    "through_wall": {
+        "energy_threshold_factor": 1.8,
+        "variance_threshold_factor": 2.0,
+        "spectral_threshold_factor": 1.5,
+        "presence_threshold": 0.35,
+        "ema_alpha": 0.25,
+    },
+    "same_room": {
+        "energy_threshold_factor": 3.5,
+        "variance_threshold_factor": 4.0,
+        "spectral_threshold_factor": 3.0,
+        "presence_threshold": 0.6,
+        "ema_alpha": 0.35,
+    },
+    "high_sensitivity": {
+        "energy_threshold_factor": 1.5,
+        "variance_threshold_factor": 1.5,
+        "spectral_threshold_factor": 1.2,
+        "presence_threshold": 0.3,
+        "ema_alpha": 0.2,
+    },
+}
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -368,28 +591,122 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(data).encode('utf-8'))
+        elif self.path == '/api/stream':
+            self._handle_sse()
         else:
             self.send_error(404)
+
+    def _handle_sse(self):
+        """Server-Sent Events endpoint for real-time streaming."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Connection', 'keep-alive')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+
+        try:
+            while True:
+                with _state_lock:
+                    data = dict(_dashboard_state)
+                payload = f"data: {json.dumps(data)}\n\n"
+                self.wfile.write(payload.encode('utf-8'))
+                self.wfile.flush()
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def do_POST(self):
         if self.path == '/api/calibrate':
             global _detector
             if _detector:
                 _detector.calibrate_start()
-                # Auto-finish after collecting enough samples
+                with _state_lock:
+                    _dashboard_state['calibration_progress'] = 0.01
                 threading.Timer(30.0, _finish_calibration).start()
+                # Progress updates
+                for i in range(1, 30):
+                    threading.Timer(float(i), _update_cal_progress, args=(i/30.0,)).start()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(b'{"status":"calibrating"}')
+        elif self.path == '/api/record':
+            self._handle_record()
+        elif self.path == '/api/profile':
+            self._handle_profile()
         else:
             self.send_error(404)
+
+    def _handle_record(self):
+        """Toggle data recording for training data collection."""
+        global _recording, _record_file, _record_count, _record_label
+        content_len = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_len)) if content_len else {}
+
+        if _recording:
+            # Stop recording
+            _recording = False
+            if _record_file:
+                _record_file.close()
+                _record_file = None
+            with _state_lock:
+                _dashboard_state['recording'] = False
+            result = {"recording": False, "frames_saved": _record_count}
+        else:
+            # Start recording
+            _record_label = body.get('label', 'unknown')
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            rec_dir = Path(__file__).resolve().parent.parent / 'data' / 'recordings'
+            rec_dir.mkdir(parents=True, exist_ok=True)
+            rec_path = rec_dir / f'{_record_label}_{ts}.jsonl'
+            _record_file = open(rec_path, 'w')
+            _record_count = 0
+            _recording = True
+            with _state_lock:
+                _dashboard_state['recording'] = True
+                _dashboard_state['record_count'] = 0
+            result = {"recording": True, "path": str(rec_path)}
+            print(f"[dashboard] Recording to {rec_path}", file=sys.stderr)
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(result).encode('utf-8'))
+
+    def _handle_profile(self):
+        """Switch detection profile."""
+        global _detector
+        content_len = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_len)) if content_len else {}
+        profile_name = body.get('profile', 'default')
+        profile = DETECTION_PROFILES.get(profile_name, DETECTION_PROFILES['default'])
+
+        if _detector:
+            _detector.energy_threshold_factor = profile['energy_threshold_factor']
+            _detector.variance_threshold_factor = profile['variance_threshold_factor']
+            _detector.spectral_threshold_factor = profile['spectral_threshold_factor']
+            _detector.presence_threshold = profile['presence_threshold']
+            _detector.ema_alpha = profile['ema_alpha']
+            print(f"[dashboard] Switched to profile: {profile_name}", file=sys.stderr)
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({"profile": profile_name}).encode('utf-8'))
+
+
+def _update_cal_progress(progress: float):
+    with _state_lock:
+        _dashboard_state['calibration_progress'] = progress
 
 
 def _finish_calibration():
     global _detector
     if _detector:
         success = _detector.calibrate_finish()
+        with _state_lock:
+            _dashboard_state['calibration_progress'] = 0.0
         if success:
             cal_path = Path(__file__).resolve().parent.parent / 'data' / 'calibration.json'
             cal_path.parent.mkdir(parents=True, exist_ok=True)
@@ -439,6 +756,7 @@ def _pipeline_thread(
 
     def process_packet(pkt):
         nonlocal frame_count
+        global _record_count
         buffer.append(pkt)
         # Keep buffer bounded
         while len(buffer) > 300:
@@ -456,14 +774,42 @@ def _pipeline_thread(
         rssi = pkt.get('rssi')
         state = _detector.update(amps, rssi=rssi, timestamp=pkt.get('ts', time.time()))
 
+        # Record raw data if recording is active
+        if _recording and _record_file:
+            try:
+                rec_entry = {
+                    'ts': pkt.get('ts', time.time()),
+                    'csi': csi.tolist() if hasattr(csi, 'tolist') else list(csi),
+                    'rssi': rssi,
+                    'label': _record_label,
+                    'presence': state.present,
+                    'confidence': state.confidence,
+                }
+                _record_file.write(json.dumps(rec_entry) + '\n')
+                _record_count += 1
+            except Exception:
+                pass
+
         frame_count += 1
         if frame_count % 15 == 0:  # Update dashboard at ~2Hz
+            # Compute per-subcarrier energy for heatmap
+            zone_heatmap = []
+            if len(buffer) >= 5:
+                recent = np.array([p['csi'].flatten() for p in list(buffer)[-30:]
+                                   if p.get('csi') is not None and p['csi'].size > 0])
+                if recent.size > 0:
+                    sub_var = np.var(recent, axis=0)
+                    max_var = np.max(sub_var) if np.max(sub_var) > 0 else 1.0
+                    zone_heatmap = (sub_var / max_var).tolist()
+
             with _state_lock:
                 dash = _detector.get_dashboard_data()
                 _dashboard_state['current'] = dash['current']
                 _dashboard_state['history'] = dash['history']
                 _dashboard_state['calibration'] = dash['calibration']
                 _dashboard_state['started'] = True
+                _dashboard_state['zone_heatmap'] = zone_heatmap
+                _dashboard_state['record_count'] = _record_count
 
                 if state.present or frame_count % 30 == 0:
                     _log_entries.append({
