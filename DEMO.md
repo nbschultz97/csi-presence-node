@@ -52,9 +52,25 @@ Navigate to **http://localhost:8088** in any browser.
 You'll see:
 - 🎯 **Large presence indicator** — CLEAR (green) or DETECTED (red, pulsing)
 - 📊 **Real-time metrics** — energy ratio, variance ratio, spectral analysis
-- 📈 **60-second history chart** — confidence, energy, and variance over time
+- 📈 **60-second history chart** — confidence, energy, variance, and spectral over time
+- 🗺️ **Spatial zone view** — sensor, wall, and detected target position
+- 🌡️ **Subcarrier energy heatmap** — per-subcarrier activity visualization
 - 🏃 **Movement classification** — stationary, moving, or breathing detected
 - 📋 **Event log** — timestamped detection events
+
+### New Dashboard Features
+
+**Detection Profiles** — Switch between profiles via the toolbar dropdown:
+- **Default** — balanced sensitivity for general use
+- **Through-Wall** — lower thresholds optimized for attenuated through-wall signals
+- **Same Room** — higher thresholds to reduce false positives in same-room scenarios
+- **High Sensitivity** — maximum sensitivity for weak signals or long range
+
+**Data Recording** — Click "⏺ Record Data" to save labeled CSI frames for training ML models. Recordings are saved to `data/recordings/` as JSONL files with timestamps, raw CSI, RSSI, and labels.
+
+**Real-time Streaming** — Dashboard uses Server-Sent Events (SSE) for instant updates with automatic reconnection. Falls back to polling for older browsers.
+
+**Calibration Progress** — Visual progress bar during the 30-second calibration period.
 
 ## Demo Hardware Requirements
 
@@ -75,8 +91,8 @@ For best results, calibrate in the actual demo environment:
 
 ### Option A: Web Dashboard Calibration
 1. Ensure the room on the other side of the wall is **empty**
-2. Click **"Calibrate Now"** button on the dashboard
-3. Wait 30 seconds
+2. Click **"📐 Calibrate"** button in the toolbar
+3. Watch the progress bar — wait 30 seconds
 4. Calibration saves automatically to `data/calibration.json`
 
 ### Option B: Command-Line Calibration
@@ -89,28 +105,45 @@ python -m csi_node.baseline --log data/csi_raw.log --duration 60 --out data/base
 python -m csi_node.calibrate --log1 data/cal_1m.log --d1 1.0 --log2 data/cal_3m.log --d2 3.0 --config csi_node/config.yaml
 ```
 
+## Collecting Training Data
+
+The dashboard's recording feature lets you build labeled datasets for training ML models:
+
+1. Start the dashboard in live mode
+2. Click **"⏺ Record Data"** — enter a label (e.g., "empty", "walking", "standing")
+3. Perform the labeled activity for 30-60 seconds
+4. Click **"⏹ Stop Recording"**
+5. Repeat with different labels
+6. Recordings are saved to `data/recordings/<label>_<timestamp>.jsonl`
+
+Each recording contains per-frame entries with raw CSI amplitudes, RSSI, timestamps, and your label — ready for model training.
+
 ## Demo Script (Talking Points)
 
 ### Setup Phase (before audience)
 1. Position laptop on one side of a wall
 2. Start capture + dashboard
-3. Calibrate (empty room)
-4. Verify dashboard shows CLEAR
+3. Select **Through-Wall** profile from the dropdown
+4. Calibrate (empty room)
+5. Verify dashboard shows CLEAR and heatmap is quiet
 
 ### Demo Flow
 1. **"This is a standard laptop with WiFi. No special sensors, no radar."**
 2. **"The wall between us and the next room is [drywall/concrete/etc]."**
 3. **"Watch the dashboard..."** → Have someone walk into the room
-4. **Dashboard shows DETECTED** with confidence rising
-5. **"Notice the movement classification"** → person walks around vs stands still
-6. **"This runs at ~30 frames/sec, real-time detection"**
-7. **"The system is completely passive — no signals emitted, no hardware on the other side"**
+4. **Dashboard shows DETECTED** with confidence rising, heatmap lights up
+5. **"Notice the subcarrier heatmap"** → shows which frequencies are affected
+6. **"The spatial view shows estimated position"** → target icon moves
+7. **"Notice the movement classification"** → person walks around vs stands still
+8. **"This runs at ~30 frames/sec, real-time detection"**
+9. **"The system is completely passive — no signals emitted, no hardware on the other side"**
 
 ### Key Differentiators to Highlight
 - **10x cheaper** than radar alternatives (Lumineye: $60-85K, Vantage: $5-10K)
 - **Passive/covert** — no RF emissions to detect
 - **Networked** — ATAK/CoT integration for tactical overlay
 - **Through standard walls** — drywall, wood, concrete block
+- **Multiple detection modes** — energy, variance, spectral (breathing detection)
 
 ## Troubleshooting
 
@@ -118,8 +151,8 @@ python -m csi_node.calibrate --log1 data/cal_1m.log --d1 1.0 --log2 data/cal_3m.
 |-------|----------|
 | No packets | Check FeitCSI is running: `scripts/10_csi_capture.sh` |
 | Dashboard won't connect | Check port 8088 isn't in use: `lsof -i :8088` |
-| Low confidence | Recalibrate in the demo environment |
-| False positives | Increase `variance_threshold` in `config.yaml` |
+| Low confidence | Switch to **Through-Wall** or **High Sensitivity** profile |
+| False positives | Switch to **Same Room** profile or recalibrate |
 | WiFi adapter not found | Run `iw dev` to list interfaces |
 
 ## ATAK Integration (Optional)
@@ -148,17 +181,19 @@ csi-presence-node/
 ├── csi_node/
 │   ├── config.yaml         # Configuration
 │   ├── pipeline.py         # Core processing pipeline
-│   ├── presence.py         # Multi-method presence detector
-│   ├── web_dashboard.py    # Web-based real-time dashboard
+│   ├── presence.py         # Multi-method presence detector (energy/variance/spectral)
+│   ├── web_dashboard.py    # Web dashboard with SSE, heatmap, zone viz
 │   ├── gui.py              # Tkinter GUI (Linux)
 │   ├── atak.py             # ATAK/CoT integration
 │   ├── preprocessing.py    # Signal conditioning (Hampel + Butterworth)
+│   ├── simulator.py        # Synthetic CSI generator for demos
 │   ├── pose_classifier.py  # Pose classification (standing/crouching/prone)
 │   ├── calibrate.py        # RSSI distance calibration
 │   └── baseline.py         # Empty-room baseline recording
 ├── data/
-│   ├── sample_csi.b64      # Sample data for replay demos
-│   └── calibration.json    # Saved calibration (auto-generated)
+│   ├── demo_csi.log        # Sample data for replay demos
+│   ├── calibration.json    # Saved calibration (auto-generated)
+│   └── recordings/         # Labeled training data (from dashboard recording)
 └── scripts/
     ├── 10_csi_capture.sh   # Start CSI capture
     └── demo.sh             # Quick demo launcher
