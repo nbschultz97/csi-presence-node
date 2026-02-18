@@ -31,6 +31,7 @@ from . import replay as replay_mod
 from . import preprocessing
 from .presence import AdaptivePresenceDetector, PresenceState
 from .pose_classifier import extract_features
+from .environment import EnvironmentManager
 
 
 # In-memory state shared between pipeline thread and HTTP server
@@ -674,8 +675,61 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._handle_record()
         elif self.path == '/api/profile':
             self._handle_profile()
+        elif self.path == '/api/environment/save':
+            self._handle_env_save()
+        elif self.path == '/api/environment/load':
+            self._handle_env_load()
+        elif self.path == '/api/environment/list':
+            self._handle_env_list()
         else:
             self.send_error(404)
+
+    def _handle_env_list(self):
+        """List saved environment profiles."""
+        mgr = EnvironmentManager()
+        profiles = mgr.list_profiles()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({"profiles": profiles}).encode('utf-8'))
+
+    def _handle_env_save(self):
+        """Save current calibration as environment profile."""
+        global _detector
+        content_len = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_len)) if content_len else {}
+        name = body.get('name', 'default')
+        description = body.get('description', '')
+        wall_type = body.get('wall_type', 'unknown')
+
+        result = {"success": False}
+        if _detector and _detector.calibrated:
+            mgr = EnvironmentManager()
+            path = mgr.save(name=name, detector=_detector, description=description, wall_type=wall_type)
+            result = {"success": True, "path": str(path)}
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(result).encode('utf-8'))
+
+    def _handle_env_load(self):
+        """Load environment profile into detector."""
+        global _detector
+        content_len = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_len)) if content_len else {}
+        name = body.get('name', 'default')
+
+        result = {"success": False}
+        if _detector:
+            mgr = EnvironmentManager()
+            if mgr.load(name, _detector):
+                result = {"success": True, "name": name}
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(result).encode('utf-8'))
 
     def _handle_record(self):
         """Toggle data recording for training data collection."""
