@@ -1,0 +1,2 @@
+[run]
+omit = csi_node/gui.py
