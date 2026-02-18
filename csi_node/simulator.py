@@ -54,6 +54,26 @@ DEMO_SCENARIOS = [
 ]
 
 
+# Through-wall demo — attenuated signals, longer pauses for narration
+THROUGH_WALL_SCENARIOS = [
+    SimScenario("calibrating", 10.0, False, "none", 1.0, 1.0),
+    SimScenario("empty_baseline", 12.0, False, "none", 1.0, 1.0),
+    SimScenario("approach_wall", 4.0, True, "walking", 1.8, 5.0, walk_speed=1.2),
+    SimScenario("near_wall_standing", 10.0, True, "stationary", 1.6, 2.5, breathing_amplitude=0.10),
+    SimScenario("slow_movement", 8.0, True, "walking", 1.9, 6.0, walk_speed=0.8),
+    SimScenario("breathing_only", 12.0, True, "breathing", 1.4, 1.8, breathing_amplitude=0.18),
+    SimScenario("walk_across_room", 6.0, True, "walking", 2.2, 9.0, walk_speed=1.5),
+    SimScenario("crouch_stationary", 8.0, True, "stationary", 1.3, 2.0, breathing_amplitude=0.08),
+    SimScenario("stand_and_walk", 5.0, True, "walking", 2.0, 7.0, walk_speed=1.8),
+    SimScenario("person_exits", 4.0, True, "walking", 1.7, 5.0, walk_speed=2.0),
+    SimScenario("room_empty_verify", 15.0, False, "none", 1.0, 1.0),
+    SimScenario("second_person_enters", 3.0, True, "walking", 2.0, 6.0, walk_speed=1.5),
+    SimScenario("second_standing", 8.0, True, "stationary", 1.5, 2.2, breathing_amplitude=0.12),
+    SimScenario("second_exits", 3.0, True, "walking", 1.8, 5.0, walk_speed=2.0),
+    SimScenario("final_empty", 10.0, False, "none", 1.0, 1.0),
+]
+
+
 class CSISimulator:
     """Generate synthetic CSI packets that look realistic for demos.
 
@@ -68,13 +88,19 @@ class CSISimulator:
         base_amplitude: float = 20.0,
         noise_floor: float = 2.0,
         scenarios: Optional[list[SimScenario]] = None,
+        through_wall: bool = False,
         seed: Optional[int] = None,
     ):
         self.n_sub = n_subcarriers
         self.sample_rate = sample_rate_hz
         self.base_amp = base_amplitude
         self.noise_floor = noise_floor
-        self.scenarios = scenarios or DEMO_SCENARIOS
+        if scenarios:
+            self.scenarios = scenarios
+        elif through_wall:
+            self.scenarios = THROUGH_WALL_SCENARIOS
+        else:
+            self.scenarios = DEMO_SCENARIOS
         self._rng = np.random.default_rng(seed)
 
         # Generate a stable "room profile" — each subcarrier has slightly

@@ -261,6 +261,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <canvas id="chart" height="180"></canvas>
   </div>
 
+  <!-- Demo Narration (simulation only) -->
+  <div class="card full-width" id="narration-card" style="display:none">
+    <h2>🎤 Demo Narration</h2>
+    <div id="narration" style="padding:12px;background:#0d1117;border-radius:8px;font-size:0.9rem;line-height:1.6">
+      <div id="narration-text" style="color:#58a6ff;font-weight:500">Waiting for simulation...</div>
+      <div id="narration-tip" style="color:#8b949e;font-size:0.8rem;margin-top:8px"></div>
+    </div>
+  </div>
+
   <!-- Log -->
   <div class="card full-width">
     <h2>Event Log</h2>
@@ -446,6 +455,8 @@ function updateUI(data) {
   document.getElementById('conn-status').textContent =
     Math.round(c.packets_per_sec) + ' pkt/s' +
     (c.calibrated ? ' • Calibrated' : '');
+
+  updateNarration(data);
 }
 
 function addLogEntry(e) {
@@ -522,6 +533,34 @@ function updateUptime() {
   const m = String(Math.floor((s%3600)/60)).padStart(2,'0');
   const ss = String(s%60).padStart(2,'0');
   document.getElementById('uptime').textContent = h+':'+m+':'+ss;
+}
+
+// Demo narration — contextual talking points based on detection state
+const narrationRules = [
+  { check: d => !d.started, text: '⏳ Initializing detection pipeline...', tip: 'The system is warming up and collecting baseline data.' },
+  { check: d => d.calibration_progress > 0 && d.calibration_progress < 1, text: '📐 Calibrating — learning the empty room signature', tip: 'During calibration, the system records baseline energy and variance to distinguish "empty" from "occupied".' },
+  { check: d => !d.current.present && d.current.calibrated, text: '🟢 Room is clear — no human presence detected through the wall', tip: '"The system sees WiFi signals passing through the wall. Right now, there\'s no disruption — the room is empty."' },
+  { check: d => !d.current.present && !d.current.calibrated, text: '🟢 No presence — using adaptive thresholds (uncalibrated)', tip: '"Without calibration, we use a running baseline. For best results in a real demo, run a 30-second calibration first."' },
+  { check: d => d.current.present && d.current.movement === 'moving', text: '🔴 DETECTED — person is MOVING through the space', tip: '"Notice the variance ratio spiking — movement causes rapid changes in the WiFi multipath pattern. The subcarrier heatmap shows which frequencies are most affected."' },
+  { check: d => d.current.present && d.current.movement === 'breathing', text: '🔴 DETECTED — breathing pattern recognized', tip: '"Even when completely still, the chest expansion from breathing modulates the WiFi signal at 0.2-0.4 Hz. This is the spectral detection method at work."' },
+  { check: d => d.current.present && d.current.movement === 'stationary', text: '🔴 DETECTED — person is stationary', tip: '"A stationary person still shifts the energy baseline and creates subtle variance. The system fuses energy, variance, and spectral methods for robust detection."' },
+  { check: d => d.current.present, text: '🔴 Human presence DETECTED through the wall', tip: '"This detection uses only ambient WiFi — completely passive, no emissions. 10x cheaper than radar alternatives."' },
+];
+
+let lastNarration = '';
+function updateNarration(data) {
+  if (!data.simulate) { document.getElementById('narration-card').style.display = 'none'; return; }
+  document.getElementById('narration-card').style.display = '';
+  for (const rule of narrationRules) {
+    if (rule.check(data)) {
+      if (rule.text !== lastNarration) {
+        document.getElementById('narration-text').textContent = rule.text;
+        document.getElementById('narration-tip').textContent = rule.tip;
+        lastNarration = rule.text;
+      }
+      return;
+    }
+  }
 }
 
 window.addEventListener('load', () => {
@@ -720,6 +759,7 @@ def _pipeline_thread(
     speed: float = 1.0,
     auto_calibrate: bool = True,
     simulate: bool = False,
+    through_wall: bool = False,
 ):
     """Run the CSI pipeline and feed the detector."""
     global _detector
@@ -727,11 +767,33 @@ def _pipeline_thread(
     cfg_path = Path(__file__).resolve().parent / 'config.yaml'
     cfg = yaml.safe_load(open(cfg_path))
 
-    _detector = AdaptivePresenceDetector(
-        energy_threshold_factor=cfg.get('energy_threshold_factor', 2.5),
-        variance_threshold_factor=cfg.get('variance_threshold_factor', 3.0),
-        sample_rate_hz=cfg.get('sample_rate_hz', 30.0),
-    )
+    # Apply through-wall profile if requested
+    if through_wall:
+        profile = DETECTION_PROFILES['through_wall']
+        _detector = AdaptivePresenceDetector(
+            energy_threshold_factor=profile['energy_threshold_factor'],
+            variance_threshold_factor=profile['variance_threshold_factor'],
+            presence_threshold=profile['presence_threshold'],
+            ema_alpha=profile['ema_alpha'],
+            sample_rate_hz=cfg.get('sample_rate_hz', 30.0),
+        )
+    else:
+        _detector = AdaptivePresenceDetector(
+            energy_threshold_factor=cfg.get('energy_threshold_factor', 2.5),
+            variance_threshold_factor=cfg.get('variance_threshold_factor', 3.0),
+            sample_rate_hz=cfg.get('sample_rate_hz', 30.0),
+        )
+
+    # Initialize ATAK streamer if enabled in config
+    atak_streamer = None
+    if cfg.get('atak_enabled', False):
+        try:
+            from .udp_streamer import UDPStreamer
+            atak_streamer = UDPStreamer.from_config(cfg)
+            atak_streamer.send_sensor_status("active")
+            print(f"[dashboard] ATAK CoT streaming to port {cfg.get('atak_port', 4242)}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[dashboard] ATAK init failed: {exc}", file=sys.stderr)
 
     # Try to load existing calibration
     cal_path = Path(__file__).resolve().parent.parent / 'data' / 'calibration.json'
@@ -790,6 +852,20 @@ def _pipeline_thread(
             except Exception:
                 pass
 
+        # Stream to ATAK if enabled
+        if atak_streamer and frame_count % 15 == 0:
+            try:
+                atak_streamer.send({
+                    'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'presence': state.present,
+                    'direction': state.direction,
+                    'distance_m': state.distance_m,
+                    'confidence': state.confidence,
+                    'pose': state.movement if state.movement != 'none' else 'unknown',
+                })
+            except Exception:
+                pass
+
         frame_count += 1
         if frame_count % 15 == 0:  # Update dashboard at ~2Hz
             # Compute per-subcarrier energy for heatmap
@@ -824,10 +900,12 @@ def _pipeline_thread(
     try:
         if simulate:
             from .simulator import CSISimulator
-            print("[dashboard] Running in SIMULATION mode — synthetic CSI data", file=sys.stderr)
+            mode_label = "THROUGH-WALL SIMULATION" if through_wall else "SIMULATION"
+            print(f"[dashboard] Running in {mode_label} mode — synthetic CSI data", file=sys.stderr)
             with _state_lock:
                 _dashboard_state['simulate'] = True
-            sim = CSISimulator()
+                _dashboard_state['through_wall'] = through_wall
+            sim = CSISimulator(through_wall=through_wall)
             for pkt in sim.stream(loop=True, realtime=True):
                 process_packet(pkt)
         elif replay_path:
@@ -880,12 +958,13 @@ def run_dashboard(
     log_path: Optional[str] = None,
     speed: float = 1.0,
     simulate: bool = False,
+    through_wall: bool = False,
 ):
     """Start the web dashboard with pipeline."""
     # Start pipeline in background
     t = threading.Thread(
         target=_pipeline_thread,
-        args=(replay_path, log_path, speed, True, simulate),
+        args=(replay_path, log_path, speed, True, simulate, through_wall),
         daemon=True,
     )
     t.start()
@@ -907,6 +986,7 @@ def main():
     parser.add_argument('--log', type=str, default=None, help='Tail a CSI log file')
     parser.add_argument('--speed', type=float, default=1.0, help='Replay speed')
     parser.add_argument('--simulate', action='store_true', help='Use synthetic CSI data (no hardware needed)')
+    parser.add_argument('--through-wall', action='store_true', help='Through-wall detection profile')
     args = parser.parse_args()
 
     run_dashboard(
@@ -915,6 +995,7 @@ def main():
         log_path=args.log,
         speed=args.speed,
         simulate=args.simulate,
+        through_wall=args.through_wall,
     )
 
 

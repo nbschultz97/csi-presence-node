@@ -76,6 +76,8 @@ def main():
     parser.add_argument("--log", type=str, default=None, help="Override input log path")
     parser.add_argument("--config", "-c", type=str, default=None, help="Config file path")
     parser.add_argument("--port", type=int, default=8088, help="Dashboard HTTP port")
+    parser.add_argument("--through-wall", action="store_true",
+                        help="Use through-wall detection profile and scenarios (lower thresholds, attenuated signals)")
 
     args = parser.parse_args()
 
@@ -104,11 +106,14 @@ def main():
 
     if args.demo:
         from csi_node.web_dashboard import run_dashboard
-        print("\n  🎯 VANTAGE DEMO MODE")
+        tw = args.through_wall
+        print("\n  🎯 VANTAGE DEMO MODE" + (" — THROUGH-WALL" if tw else ""))
         print("  Generating synthetic CSI data — no hardware required.")
+        if tw:
+            print("  Through-wall profile: lower thresholds, attenuated signals, longer scenarios")
         print("  Scenarios: empty room → person enters → movement → breathing → exits")
         print(f"  Dashboard: http://localhost:{args.port}\n")
-        run_dashboard(port=args.port, simulate=True)
+        run_dashboard(port=args.port, simulate=True, through_wall=tw)
         return
 
     if args.dashboard:
@@ -118,6 +123,7 @@ def main():
             replay_path=args.replay,
             log_path=args.log,
             speed=args.speed,
+            through_wall=args.through_wall,
         )
         return
 

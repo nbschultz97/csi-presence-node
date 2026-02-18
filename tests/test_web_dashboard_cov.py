@@ -72,6 +72,7 @@ class TestMainCLI:
                 log_path=None,
                 speed=1.0,
                 simulate=False,
+                through_wall=False,
             )
 
     def test_custom_args(self):
@@ -84,6 +85,7 @@ class TestMainCLI:
                 log_path=None,
                 speed=2.0,
                 simulate=True,
+                through_wall=False,
             )
 
     def test_replay_arg(self):
