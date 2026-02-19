@@ -64,6 +64,11 @@ def main():
         action="store_true",
         help="Launch demo mode — simulated CSI data + web dashboard (no hardware needed)",
     )
+    mode_group.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Run pre-flight checks to verify demo readiness",
+    )
 
     # Pipeline arguments (when not in special mode)
     parser.add_argument("--pose", action="store_true", help="Enable pose classifier")
@@ -103,6 +108,10 @@ def main():
         from csi_node.setup_wizard import main as setup_main
         setup_main()
         return
+
+    if args.preflight:
+        from csi_node.preflight import main as preflight_main
+        sys.exit(preflight_main())
 
     if args.demo:
         from csi_node.web_dashboard import run_dashboard

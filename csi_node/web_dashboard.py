@@ -32,6 +32,7 @@ from . import preprocessing
 from .presence import AdaptivePresenceDetector, PresenceState
 from .pose_classifier import extract_features
 from .environment import EnvironmentManager
+from .zone_detector import MultiZoneDetector
 
 
 # In-memory state shared between pipeline thread and HTTP server
@@ -48,6 +49,7 @@ _dashboard_state = {
     "record_count": 0,
     "calibration_progress": 0.0,
     "zone_heatmap": [],
+    "multi_zone": {"zones": [], "primary_zone": "none", "total_confidence": 0, "occupancy_count": 0},
 }
 _state_lock = threading.Lock()
 _detector: Optional[AdaptivePresenceDetector] = None
@@ -231,6 +233,40 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="card two-thirds">
     <h2>Subcarrier Energy Heatmap</h2>
     <div class="heatmap-container" id="heatmap"></div>
+  </div>
+
+  <!-- Multi-zone detection -->
+  <div class="card">
+    <h2>Zone Detection</h2>
+    <div id="zone-bars" style="display:flex;flex-direction:column;gap:8px;">
+      <div class="zone-bar-row" id="zone-near">
+        <div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-bottom:2px">
+          <span>NEAR (wall-side)</span><span id="zone-near-pct">0%</span>
+        </div>
+        <div style="height:18px;background:#21262d;border-radius:4px;overflow:hidden">
+          <div id="zone-near-fill" style="height:100%;width:0%;border-radius:4px;transition:all 0.3s;background:#3fb950"></div>
+        </div>
+      </div>
+      <div class="zone-bar-row" id="zone-mid">
+        <div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-bottom:2px">
+          <span>MID (center)</span><span id="zone-mid-pct">0%</span>
+        </div>
+        <div style="height:18px;background:#21262d;border-radius:4px;overflow:hidden">
+          <div id="zone-mid-fill" style="height:100%;width:0%;border-radius:4px;transition:all 0.3s;background:#3fb950"></div>
+        </div>
+      </div>
+      <div class="zone-bar-row" id="zone-far">
+        <div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-bottom:2px">
+          <span>FAR (opposite wall)</span><span id="zone-far-pct">0%</span>
+        </div>
+        <div style="height:18px;background:#21262d;border-radius:4px;overflow:hidden">
+          <div id="zone-far-fill" style="height:100%;width:0%;border-radius:4px;transition:all 0.3s;background:#3fb950"></div>
+        </div>
+      </div>
+      <div style="font-size:0.75rem;color:#8b949e;margin-top:4px">
+        Primary zone: <strong id="zone-primary">—</strong> | Occupied: <strong id="zone-count">0</strong>/3
+      </div>
+    </div>
   </div>
 
   <!-- Movement & Direction -->
@@ -456,6 +492,26 @@ function updateUI(data) {
   document.getElementById('conn-status').textContent =
     Math.round(c.packets_per_sec) + ' pkt/s' +
     (c.calibrated ? ' • Calibrated' : '');
+
+  // Multi-zone
+  if (data.multi_zone && data.multi_zone.zones) {
+    const zoneNames = ['near', 'mid', 'far'];
+    data.multi_zone.zones.forEach((z, i) => {
+      const name = zoneNames[i] || z.name;
+      const fill = document.getElementById('zone-' + name + '-fill');
+      const pct = document.getElementById('zone-' + name + '-pct');
+      if (fill && pct) {
+        const p = Math.round(Math.min(z.confidence, 1) * 100);
+        fill.style.width = p + '%';
+        fill.style.background = z.active ? '#f85149' : (p > 20 ? '#d29922' : '#3fb950');
+        pct.textContent = p + '%';
+      }
+    });
+    const pe = document.getElementById('zone-primary');
+    const zc = document.getElementById('zone-count');
+    if (pe) pe.textContent = data.multi_zone.primary_zone.toUpperCase();
+    if (zc) zc.textContent = data.multi_zone.occupancy_count;
+  }
 
   updateNarration(data);
 }
@@ -849,6 +905,17 @@ def _pipeline_thread(
         except Exception as exc:
             print(f"[dashboard] ATAK init failed: {exc}", file=sys.stderr)
 
+    # Initialize multi-zone detector
+    zone_detector = MultiZoneDetector(
+        n_zones=3,
+        zone_names=["near", "mid", "far"],
+        energy_threshold=1.8 if through_wall else 2.5,
+        variance_threshold=2.0 if through_wall else 3.0,
+    )
+    if auto_calibrate:
+        zone_detector.calibrate_start()
+        # Will finish when _detector finishes auto-calibration
+
     # Try to load existing calibration
     cal_path = Path(__file__).resolve().parent.parent / 'data' / 'calibration.json'
     if cal_path.exists():
@@ -889,6 +956,12 @@ def _pipeline_thread(
 
         rssi = pkt.get('rssi')
         state = _detector.update(amps, rssi=rssi, timestamp=pkt.get('ts', time.time()))
+
+        # Multi-zone detection
+        zone_state = zone_detector.update(amps)
+        # Auto-finish zone calibration when main detector finishes
+        if _detector.calibrated and not zone_detector._calibrated and zone_detector._calibrating:
+            zone_detector.calibrate_finish()
 
         # Record raw data if recording is active
         if _recording and _record_file:
@@ -940,6 +1013,7 @@ def _pipeline_thread(
                 _dashboard_state['started'] = True
                 _dashboard_state['zone_heatmap'] = zone_heatmap
                 _dashboard_state['record_count'] = _record_count
+                _dashboard_state['multi_zone'] = zone_state.to_dict()
 
                 if state.present or frame_count % 30 == 0:
                     _log_entries.append({
