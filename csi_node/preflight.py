@@ -170,7 +170,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Vantage pre-flight demo check")
     parser.add_argument("--port", type=int, default=8088, help="Port to check")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     print("\n  🎯 VANTAGE Pre-Flight Check\n  " + "=" * 36 + "\n")
 
