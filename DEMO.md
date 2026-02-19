@@ -8,7 +8,7 @@ The system uses WiFi Channel State Information (CSI) to detect human presence wi
 
 ## Quick Start (5 minutes)
 
-### 1. Install Dependencies
+### 1. Pre-Flight Check
 
 ```bash
 # Clone and setup
@@ -16,7 +16,19 @@ git clone https://github.com/nbschultz97/csi-presence-node.git
 cd csi-presence-node
 pip install -r requirements.txt
 
-# On Linux with FeitCSI hardware:
+# Verify everything is ready
+python run.py --preflight
+```
+
+On **Windows (PowerShell)** — one command does everything:
+```powershell
+.\demo.ps1                     # Simulation mode
+.\demo.ps1 -ThroughWall       # Through-wall demo
+.\demo.ps1 -Live -Log .\data\csi_raw.log   # Live mode
+```
+
+On **Linux** with FeitCSI hardware:
+```bash
 bash scripts/00_install_deps.sh
 ```
 
@@ -71,6 +83,8 @@ You'll see:
 **Real-time Streaming** — Dashboard uses Server-Sent Events (SSE) for instant updates with automatic reconnection. Falls back to polling for older browsers.
 
 **Calibration Progress** — Visual progress bar during the 30-second calibration period.
+
+**Multi-Zone Detection** — Splits subcarriers into near/mid/far zones for coarse spatial localization. Shows per-zone confidence bars, primary occupied zone, and total zone count. Useful for demonstrating "the system can tell roughly where in the room they are."
 
 ## Demo Hardware Requirements
 
@@ -176,7 +190,8 @@ Presence detections will appear as markers in ATAK/WinTAK.
 
 ```
 csi-presence-node/
-├── run.py                  # Main entry point
+├── run.py                  # Main entry point (--demo, --dashboard, --preflight)
+├── demo.ps1                # Windows PowerShell quick-start
 ├── DEMO.md                 # This file
 ├── csi_node/
 │   ├── config.yaml         # Configuration
@@ -188,6 +203,8 @@ csi-presence-node/
 │   ├── preprocessing.py    # Signal conditioning (Hampel + Butterworth)
 │   ├── simulator.py        # Synthetic CSI generator for demos
 │   ├── pose_classifier.py  # Pose classification (standing/crouching/prone)
+│   ├── zone_detector.py    # Multi-zone spatial detection (near/mid/far)
+│   ├── preflight.py        # Pre-flight demo readiness check
 │   ├── calibrate.py        # RSSI distance calibration
 │   └── baseline.py         # Empty-room baseline recording
 ├── data/
