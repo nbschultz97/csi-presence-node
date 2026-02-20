@@ -17,6 +17,7 @@ from . import replay as replay_mod
 from . import config_validator
 from . import preprocessing
 from .pose_classifier import extract_features
+from .presence import AdaptivePresenceDetector
 
 # TUI is optional (requires curses, Unix-only)
 try:
@@ -267,6 +268,7 @@ def run_demo(
     out: str = "data/presence_log.jsonl",
     speed: float = 1.0,
     log_override: str | None = None,
+    through_wall: bool = False,
 ) -> None:
     """Run realtime or replay pipeline with optional pose and TUI."""
     # Load config relative to this file to avoid CWD issues
@@ -318,6 +320,27 @@ def run_demo(
             pose_clf = PoseClassifier("models/wipose.joblib")
         except Exception as exc:  # pragma: no cover - classifier optional
             print(f"Pose classifier init failed: {exc}", file=sys.stderr)
+
+    # Initialize AdaptivePresenceDetector for multi-method fusion
+    from .web_dashboard import DETECTION_PROFILES
+    profile_name = "through_wall" if through_wall else "default"
+    profile = DETECTION_PROFILES.get(profile_name, DETECTION_PROFILES["default"])
+    adaptive_detector = AdaptivePresenceDetector(
+        energy_threshold_factor=profile["energy_threshold_factor"],
+        variance_threshold_factor=profile["variance_threshold_factor"],
+        presence_threshold=profile["presence_threshold"],
+        ema_alpha=profile["ema_alpha"],
+        sample_rate_hz=cfg.get("sample_rate_hz", 30.0),
+    )
+    # Load existing calibration if available
+    cal_path = Path(__file__).resolve().parent.parent / "data" / "calibration.json"
+    if cal_path.exists():
+        adaptive_detector.load_calibration(cal_path)
+        print(f"[pipeline] Loaded calibration from {cal_path}", file=sys.stderr)
+    else:
+        # Auto-calibrate from first 100 frames
+        adaptive_detector.auto_calibrate(100)
+        print("[pipeline] Auto-calibrating from first 100 frames", file=sys.stderr)
 
     alpha = 0.2
     presence_ema = 0.0
@@ -372,6 +395,22 @@ def run_demo(
 
     def handle(result: dict) -> None:
         nonlocal presence_ema, pose_ema, last_dir, l_cnt, r_cnt, fatal_exc, prev_var
+
+        # Feed raw CSI amplitudes to the adaptive multi-method detector
+        if buffer:
+            recent_pkts = [p for p in buffer if p.get("csi") is not None]
+            if recent_pkts:
+                last_pkt = recent_pkts[-1]
+                rssi = last_pkt.get("rssi")
+                adaptive_state = adaptive_detector.update(
+                    last_pkt["csi"], rssi=rssi, timestamp=last_pkt.get("ts")
+                )
+                # Use adaptive detector's presence decision (fuses energy+variance+spectral)
+                result["presence"] = int(adaptive_state.present)
+                result["movement"] = adaptive_state.movement
+                result["adaptive_confidence"] = adaptive_state.confidence
+                result["adaptive_method"] = adaptive_state.method
+
         raw = 1.0 if result["presence"] else 0.0
         presence_ema = alpha * raw + (1 - alpha) * presence_ema
         diff = result["rssi0"] - result["rssi1"]
@@ -413,7 +452,8 @@ def run_demo(
             "pose": pose_label.lower(),
             "direction": {"L": "left", "R": "right", "C": "center"}[last_dir],
             "distance_m": float(result["distance"]),
-            "confidence": presence_ema,
+            "confidence": result.get("adaptive_confidence", presence_ema),
+            "method": result.get("adaptive_method", "variance"),
         }
         print(json.dumps(entry))
         try:
@@ -635,6 +675,7 @@ def main() -> None:
     parser.add_argument("--out", type=str, default="data/presence_log.jsonl", help="output JSONL")
     parser.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
     parser.add_argument("--log", type=str, default=None, help="override path to input JSONL log")
+    parser.add_argument("--through-wall", action="store_true", help="use through-wall detection profile")
     args = parser.parse_args()
 
     src = None
@@ -654,6 +695,7 @@ def main() -> None:
         out=args.out,
         speed=args.speed,
         log_override=args.log,
+        through_wall=getattr(args, 'through_wall', False),
     )
 
 

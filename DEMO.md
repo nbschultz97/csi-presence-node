@@ -52,6 +52,12 @@ python run.py --dashboard --log data/csi_raw.log
 sudo bash scripts/10_csi_capture.sh
 ```
 
+**CLI pipeline with through-wall detection (headless):**
+```bash
+python run.py --through-wall --log data/csi_raw.log
+```
+The `--through-wall` flag activates lower detection thresholds and the multi-method AdaptivePresenceDetector (energy + variance + spectral fusion) optimized for attenuated through-wall signals.
+
 **With the Tkinter GUI (Linux):**
 ```bash
 python -m csi_node.gui
@@ -109,7 +115,17 @@ For best results, calibrate in the actual demo environment:
 3. Watch the progress bar — wait 30 seconds
 4. Calibration saves automatically to `data/calibration.json`
 
-### Option B: Command-Line Calibration
+### Option B: Quick CLI Calibration (NEW)
+```bash
+# Interactive 30-second calibration — saves calibration.json + optional environment profile
+python run.py --calibrate
+
+# With live CSI log file
+python run.py --calibrate --log data/csi_raw.log
+```
+This runs the AdaptivePresenceDetector's multi-method calibration (energy + variance + spectral baselines) and optionally saves a named environment profile for quick switching between demo sites.
+
+### Option C: Baseline + RSSI Calibration (Advanced)
 ```bash
 # Record empty-room baseline (60 seconds)
 python -m csi_node.baseline --log data/csi_raw.log --duration 60 --out data/baseline.npz

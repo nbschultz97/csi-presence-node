@@ -22,7 +22,16 @@ Usage:
 """
 
 import sys
+import os
 import argparse
+
+# Fix Windows console encoding for emoji output
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 
 def main():
@@ -69,6 +78,11 @@ def main():
         action="store_true",
         help="Run pre-flight checks to verify demo readiness",
     )
+    mode_group.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="Run 30-second empty-room calibration for presence detection",
+    )
 
     # Pipeline arguments (when not in special mode)
     parser.add_argument("--pose", action="store_true", help="Enable pose classifier")
@@ -113,6 +127,85 @@ def main():
         from csi_node.preflight import main as preflight_main
         sys.exit(preflight_main())
 
+    if args.calibrate:
+        from csi_node.presence import AdaptivePresenceDetector
+        from csi_node.environment import EnvironmentManager
+        from pathlib import Path
+        import time
+        import numpy as np
+
+        detector = AdaptivePresenceDetector(sample_rate_hz=30.0)
+        detector.calibrate_start()
+
+        print("\n  📐 VANTAGE CALIBRATION")
+        print("  Ensure the detection area is EMPTY.")
+        print("  Collecting 30 seconds of baseline data...\n")
+
+        # Use simulator for calibration if no log file available
+        log_path = args.log
+        if log_path:
+            from csi_node import utils
+            lp = Path(log_path)
+            if not lp.exists():
+                print(f"  ❌ Log file not found: {log_path}")
+                sys.exit(1)
+            # Tail log file for 30 seconds
+            import json as json_mod
+            start = time.time()
+            count = 0
+            with open(lp, "r") as f:
+                f.seek(0, 2)
+                while time.time() - start < 30:
+                    line = f.readline()
+                    if not line:
+                        time.sleep(0.03)
+                        continue
+                    pkt = utils.parse_csi_line(line)
+                    if pkt and pkt.get("csi") is not None:
+                        detector.update(pkt["csi"], rssi=pkt.get("rssi"), timestamp=pkt.get("ts"))
+                        count += 1
+                        if count % 30 == 0:
+                            elapsed = time.time() - start
+                            print(f"  {elapsed:.0f}s / 30s  ({count} frames)", end="\r")
+        else:
+            from csi_node.simulator import CSISimulator, SimScenario
+            empty = [SimScenario("calibration", 30.0, False, "none", 1.0, 1.0)]
+            sim = CSISimulator(scenarios=empty)
+            count = 0
+            start = time.time()
+            for pkt in sim.stream(loop=False, realtime=True):
+                detector.update(pkt["csi"], rssi=pkt.get("rssi"), timestamp=pkt.get("ts"))
+                count += 1
+                if count % 30 == 0:
+                    elapsed = time.time() - start
+                    print(f"  {elapsed:.0f}s / 30s  ({count} frames)", end="\r")
+
+        print()
+        success = detector.calibrate_finish()
+        if success:
+            cal_dir = Path(__file__).resolve().parent / "data"
+            cal_dir.mkdir(parents=True, exist_ok=True)
+            cal_path = cal_dir / "calibration.json"
+            detector.save_calibration(cal_path)
+            print(f"  ✅ Calibration saved to {cal_path}")
+            print(f"  Baseline energy:   {detector._baseline_energy:.2f}")
+            print(f"  Baseline variance: {detector._baseline_variance:.6f}")
+            print(f"  Baseline spectral: {detector._baseline_spectral:.6f}")
+            print(f"  Frames collected:  {count}")
+
+            # Optionally save as named environment profile
+            env_name = input("\n  Save as environment profile? (name or Enter to skip): ").strip()
+            if env_name:
+                wall = input("  Wall type (drywall/concrete/wood/none): ").strip() or "unknown"
+                mgr = EnvironmentManager()
+                path = mgr.save(env_name, detector, wall_type=wall)
+                print(f"  ✅ Profile saved: {path}")
+        else:
+            print("  ❌ Calibration failed — not enough samples collected.")
+            sys.exit(1)
+        print()
+        return
+
     if args.demo:
         from csi_node.web_dashboard import run_dashboard
         tw = args.through_wall
@@ -156,6 +249,7 @@ def main():
         out=args.out,
         speed=args.speed,
         log_override=args.log,
+        through_wall=args.through_wall,
     )
 
 
