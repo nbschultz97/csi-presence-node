@@ -170,21 +170,40 @@ class CSISimulator:
     def stream(self, loop: bool = True, realtime: bool = True) -> Iterator[dict]:
         """Yield synthetic CSI packets following the scenario sequence.
 
+        Applies smooth crossfade transitions between scenarios so detection
+        metrics don't jump abruptly (which looks unrealistic in demos).
+
         Args:
             loop: If True, loop scenarios forever. If False, play once.
             realtime: If True, sleep between packets. If False, yield instantly.
         """
         t = time.time()
         dt = 1.0 / self.sample_rate
+        # Number of frames to crossfade between scenarios
+        fade_frames = int(self.sample_rate * 1.0)  # 1-second crossfade
 
         while True:
-            for scenario in self.scenarios:
+            for s_idx, scenario in enumerate(self.scenarios):
                 n_frames = int(scenario.duration_s * self.sample_rate)
-                scenario_start = t
+                # Get the previous scenario for fade-in blending
+                prev_scenario = self.scenarios[s_idx - 1] if s_idx > 0 else scenario
 
                 for i in range(n_frames):
                     scenario_t = i * dt
-                    pkt = self._generate_frame(t, scenario, scenario_t)
+                    # Crossfade: blend previous scenario into current at the start
+                    if i < fade_frames and s_idx > 0:
+                        alpha = i / fade_frames  # 0→1 over fade period
+                        pkt_new = self._generate_frame(t, scenario, scenario_t)
+                        pkt_old = self._generate_frame(t, prev_scenario, scenario_t)
+                        # Blend CSI amplitudes
+                        blended_csi = (1 - alpha) * pkt_old["csi"] + alpha * pkt_new["csi"]
+                        blended_rssi = [
+                            (1 - alpha) * pkt_old["rssi"][0] + alpha * pkt_new["rssi"][0],
+                            (1 - alpha) * pkt_old["rssi"][1] + alpha * pkt_new["rssi"][1],
+                        ]
+                        pkt = {"ts": t, "csi": blended_csi, "rssi": blended_rssi}
+                    else:
+                        pkt = self._generate_frame(t, scenario, scenario_t)
                     yield pkt
                     t += dt
                     if realtime:

@@ -50,6 +50,8 @@ _dashboard_state = {
     "calibration_progress": 0.0,
     "zone_heatmap": [],
     "multi_zone": {"zones": [], "primary_zone": "none", "total_confidence": 0, "occupancy_count": 0},
+    "detection_count": 0,
+    "frame_count": 0,
 }
 _state_lock = threading.Lock()
 _detector: Optional[AdaptivePresenceDetector] = None
@@ -154,6 +156,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     width: 0; height: 0; opacity: 0.1; z-index: 0; }
   /* Uptime counter */
   .uptime { font-variant-numeric: tabular-nums; }
+  /* Signal quality bar */
+  .signal-quality { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: #8b949e; }
+  .sq-bars { display: flex; align-items: flex-end; gap: 2px; height: 16px; }
+  .sq-bar { width: 4px; border-radius: 1px; background: #30363d; transition: background 0.3s; }
+  .sq-bar.active { background: #3fb950; }
+  .sq-bar.warn { background: #d29922; }
+  .sq-bar.bad { background: #f85149; }
+  /* Detection stats summary */
+  .stats-row { display: flex; gap: 16px; font-size: 0.75rem; color: #8b949e; padding: 4px 0; }
+  .stats-row .stat-val { color: #e0e0e0; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -164,6 +176,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span class="badge badge-live" id="badge-live" style="display:none">● LIVE</span>
     <span class="badge badge-sim" id="badge-sim" style="display:none">◉ SIMULATION</span>
     <span class="badge badge-rec" id="badge-rec" style="display:none">⏺ REC</span>
+  </div>
+  <div class="signal-quality" id="signal-quality">
+    <div class="sq-bars" id="sq-bars">
+      <div class="sq-bar" style="height:4px"></div>
+      <div class="sq-bar" style="height:7px"></div>
+      <div class="sq-bar" style="height:10px"></div>
+      <div class="sq-bar" style="height:13px"></div>
+      <div class="sq-bar" style="height:16px"></div>
+    </div>
+    <span id="sq-label">—</span>
   </div>
   <div class="status" id="conn-status">Connecting...</div>
 </div>
@@ -311,6 +333,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="card full-width">
     <h2>Event Log</h2>
     <div class="log-area" id="log-area"></div>
+    <div class="stats-row" id="session-stats">
+      <span>Detections: <span class="stat-val" id="stat-detections">0</span></span>
+      <span>Avg confidence: <span class="stat-val" id="stat-avg-conf">—</span></span>
+      <span>Frames: <span class="stat-val" id="stat-frames">0</span></span>
+      <span>Uptime: <span class="stat-val uptime" id="stat-uptime">00:00</span></span>
+    </div>
   </div>
 </div>
 
@@ -322,6 +350,10 @@ let startTime = Date.now();
 let evtSource = null;
 let heatmapBars = [];
 let logCount = 0;
+let totalDetections = 0;
+let totalFrames = 0;
+let confSum = 0;
+let confCount = 0;
 
 function initChart() {
   const c = document.getElementById('chart');
@@ -492,6 +524,22 @@ function updateUI(data) {
   document.getElementById('conn-status').textContent =
     Math.round(c.packets_per_sec) + ' pkt/s' +
     (c.calibrated ? ' • Calibrated' : '');
+
+  // Signal quality bars
+  const pps = c.packets_per_sec || 0;
+  const sqBars = document.getElementById('sq-bars').children;
+  const sqLevel = pps >= 25 ? 5 : pps >= 15 ? 4 : pps >= 8 ? 3 : pps >= 3 ? 2 : pps > 0 ? 1 : 0;
+  const sqClass = sqLevel >= 4 ? 'active' : sqLevel >= 2 ? 'warn' : 'bad';
+  for (let i = 0; i < 5; i++) { sqBars[i].className = 'sq-bar' + (i < sqLevel ? ' ' + sqClass : ''); }
+  const sqLabels = ['No signal','Weak','Fair','Good','Strong','Excellent'];
+  document.getElementById('sq-label').textContent = sqLabels[sqLevel];
+
+  // Session stats
+  totalFrames++;
+  if (c.present) { totalDetections++; confSum += c.confidence; confCount++; }
+  document.getElementById('stat-detections').textContent = totalDetections;
+  document.getElementById('stat-avg-conf').textContent = confCount > 0 ? (confSum/confCount*100).toFixed(0)+'%' : '—';
+  document.getElementById('stat-frames').textContent = totalFrames;
 
   // Multi-zone
   if (data.multi_zone && data.multi_zone.zones) {
@@ -1014,6 +1062,9 @@ def _pipeline_thread(
                 _dashboard_state['zone_heatmap'] = zone_heatmap
                 _dashboard_state['record_count'] = _record_count
                 _dashboard_state['multi_zone'] = zone_state.to_dict()
+                _dashboard_state['frame_count'] = frame_count
+                if state.present:
+                    _dashboard_state['detection_count'] = _dashboard_state.get('detection_count', 0) + 1
 
                 if state.present or frame_count % 30 == 0:
                     _log_entries.append({
