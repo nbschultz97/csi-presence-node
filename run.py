@@ -83,6 +83,11 @@ def main():
         action="store_true",
         help="Run 30-second empty-room calibration for presence detection",
     )
+    mode_group.add_argument(
+        "--generate-demo-data",
+        action="store_true",
+        help="Generate sample CSI data file for replay demos (data/demo_csi.log)",
+    )
 
     # Pipeline arguments (when not in special mode)
     parser.add_argument("--pose", action="store_true", help="Enable pose classifier")
@@ -204,6 +209,14 @@ def main():
             print("  ❌ Calibration failed — not enough samples collected.")
             sys.exit(1)
         print()
+        return
+
+    if args.generate_demo_data:
+        from csi_node.simulator import generate_sample_log
+        out = "data/demo_csi.log"
+        print(f"\n  Generating 120s of sample CSI data → {out}")
+        generate_sample_log(out, duration_s=120.0, seed=42)
+        print(f"  ✅ Done. Use: python run.py --dashboard --replay {out}\n")
         return
 
     if args.demo:
