@@ -51,6 +51,10 @@ def test_fatal_log_written(tmp_path):
     if fatal.get("last_packet"):
         assert "csi" in fatal["last_packet"]
 
-    if out_path.exists() or out_path.is_symlink():
+    if out_path.is_symlink():
         resolved = out_path.resolve()
         assert resolved == log_file.resolve()
+    elif out_path.exists():
+        # On Windows, symlinks may not be created (requires privileges).
+        # The log file should still exist in the run directory.
+        assert log_file.exists()
